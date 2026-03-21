@@ -1,13 +1,15 @@
-import type { Env } from "../env";
 import { embedTexts } from "../ai/embedding";
 import { fetchExistingHashes, upsertSegments } from "../db/d1";
-import type { PreparedIndexItem } from "./schema";
+import type { Env } from "../env";
 import { chunkArray } from "../utils";
+import type { PreparedIndexItem } from "./schema";
 
 const EMBEDDING_BATCH_SIZE = 32;
 
 export interface MemoryIndexResult {
   ok: true;
+  project_id: string;
+  namespace: string;
   indexed: string[];
   skipped: string[];
   count: {
@@ -18,8 +20,13 @@ export interface MemoryIndexResult {
 }
 
 export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexItem[]): Promise<MemoryIndexResult> {
+  if (preparedItems.length === 0) {
+    throw new Error("No items to index");
+  }
+
+  const { projectId, namespace } = preparedItems[0];
   const now = Date.now();
-  const existingHashes = await fetchExistingHashes(env.DB, preparedItems.map((item) => item.id));
+  const existingHashes = await fetchExistingHashes(env.DB, projectId, preparedItems.map((item) => item.id));
 
   const itemsToUpsert = preparedItems.filter((item) => existingHashes.get(item.id) !== item.contentHash);
   const skippedItems = preparedItems.filter((item) => existingHashes.get(item.id) === item.contentHash);
@@ -38,6 +45,7 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
       await env.SEGMENTS_INDEX.upsert(
         batch.map((item, index) => ({
           id: item.id,
+          namespace: item.namespace,
           values: vectors[index],
           metadata: item.vectorMetadata,
         })),
@@ -49,6 +57,8 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
 
   return {
     ok: true,
+    project_id: projectId,
+    namespace,
     indexed: itemsToUpsert.map((item) => item.id),
     skipped: skippedItems.map((item) => item.id),
     count: {
@@ -58,4 +68,3 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
     },
   };
 }
-

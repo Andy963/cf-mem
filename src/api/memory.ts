@@ -1,15 +1,20 @@
 import type { Env } from "../env";
 import { indexMemoryItems } from "../memory/indexer";
-import { defaultMemorySchema } from "../memory/schema";
+import { defaultMemorySchema, MemorySchemaError, type SearchRequestInput } from "../memory/schema";
 import { searchMemoryItems } from "../memory/searcher";
+import type { ProjectScope } from "../project";
 import { jsonResponse, parseJson, textResponse } from "./http";
 
-export async function handleMemoryRequest(request: Request, env: Env): Promise<Response> {
+function invalidRequestResponse(env: Env, error: Error): Response {
+  return jsonResponse(env, { error: { message: error.message } }, { status: 400 });
+}
+
+export async function handleMemoryRequest(request: Request, env: Env, projectScope: ProjectScope): Promise<Response> {
   const url = new URL(request.url);
   const method = request.method.toUpperCase();
 
   if (method === "GET" && url.pathname === "/memory/health") {
-    return jsonResponse(env, { ok: true });
+    return jsonResponse(env, { ok: true, project_id: projectScope.projectId, namespace: projectScope.namespace });
   }
 
   if (method === "POST" && url.pathname === "/memory/index") {
@@ -17,7 +22,7 @@ export async function handleMemoryRequest(request: Request, env: Env): Promise<R
     try {
       body = await parseJson(request);
     } catch (error) {
-      return jsonResponse(env, { error: { message: (error as Error).message } }, { status: 400 });
+      return invalidRequestResponse(env, error as Error);
     }
 
     const items = defaultMemorySchema.normalizeIndexRequest(body);
@@ -26,10 +31,14 @@ export async function handleMemoryRequest(request: Request, env: Env): Promise<R
     }
 
     try {
-      const preparedItems = await defaultMemorySchema.prepareIndexItems(items);
+      const preparedItems = await defaultMemorySchema.prepareIndexItems(items, projectScope);
       const result = await indexMemoryItems(env, preparedItems);
       return jsonResponse(env, result);
     } catch (error) {
+      if (error instanceof MemorySchemaError) {
+        return invalidRequestResponse(env, error);
+      }
+
       return jsonResponse(env, { error: { message: (error as Error).message } }, { status: 502 });
     }
   }
@@ -39,10 +48,20 @@ export async function handleMemoryRequest(request: Request, env: Env): Promise<R
     try {
       body = await parseJson(request);
     } catch (error) {
-      return jsonResponse(env, { error: { message: (error as Error).message } }, { status: 400 });
+      return invalidRequestResponse(env, error as Error);
     }
 
-    const requestInput = defaultMemorySchema.normalizeSearchRequest(body);
+    let requestInput: SearchRequestInput | null;
+    try {
+      requestInput = defaultMemorySchema.normalizeSearchRequest(body, projectScope);
+    } catch (error) {
+      if (error instanceof MemorySchemaError) {
+        return invalidRequestResponse(env, error);
+      }
+
+      return jsonResponse(env, { error: { message: (error as Error).message } }, { status: 502 });
+    }
+
     if (!requestInput) {
       return jsonResponse(env, { error: { message: "Missing query. Use {\"query\":\"...\"}" } }, { status: 400 });
     }
@@ -51,6 +70,10 @@ export async function handleMemoryRequest(request: Request, env: Env): Promise<R
       const result = await searchMemoryItems(env, requestInput, body);
       return jsonResponse(env, result);
     } catch (error) {
+      if (error instanceof MemorySchemaError) {
+        return invalidRequestResponse(env, error);
+      }
+
       return jsonResponse(env, { error: { message: (error as Error).message } }, { status: 502 });
     }
   }
@@ -61,4 +84,3 @@ export async function handleMemoryRequest(request: Request, env: Env): Promise<R
 
   return textResponse(env, "Not Found", { status: 404 });
 }
-

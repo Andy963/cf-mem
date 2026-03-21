@@ -1,13 +1,15 @@
-import type { Env } from "../env";
 import { embedTexts } from "../ai/embedding";
 import { extractRerankResults, resolveRerankConfig } from "../ai/rerank";
 import { fetchByIds } from "../db/d1";
-import { toQueryMatches } from "../vector/vectorize";
+import type { Env } from "../env";
 import { truncateText } from "../utils";
+import { toQueryMatches } from "../vector/vectorize";
 import { defaultMemorySchema, type SearchRequestInput, type StoredMemoryRow } from "./schema";
 
 export interface MemorySearchResult {
   ok: true;
+  project_id: string;
+  namespace: string;
   topK: number;
   matches: Array<Record<string, unknown>>;
   rerank?: {
@@ -35,11 +37,18 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
   const filter = defaultMemorySchema.getFilter(requestInput);
   const [queryVector] = await embedTexts(env, [defaultMemorySchema.getQueryText(requestInput)]);
 
-  let queryResult = await env.SEGMENTS_INDEX.query(queryVector, { topK: candidateTopK, filter });
+  let queryResult = await env.SEGMENTS_INDEX.query(queryVector, {
+    topK: candidateTopK,
+    namespace: requestInput.namespace,
+    filter,
+  });
   let rawMatches = toQueryMatches(queryResult);
 
   if (filter && rawMatches.length < requestedTopK) {
-    queryResult = await env.SEGMENTS_INDEX.query(queryVector, { topK: candidateTopK });
+    queryResult = await env.SEGMENTS_INDEX.query(queryVector, {
+      topK: candidateTopK,
+      namespace: requestInput.namespace,
+    });
     rawMatches = toQueryMatches(queryResult);
   }
 
@@ -51,7 +60,7 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
       metadata: match.metadata ?? null,
     }));
 
-  const rowsById = await fetchByIds(env.DB, matches.map((match) => match.id));
+  const rowsById = await fetchByIds(env.DB, requestInput.projectId, matches.map((match) => match.id));
   const candidates: Array<{
     row: StoredMemoryRow;
     metadata: unknown;
@@ -65,17 +74,33 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
     if (!row) continue;
 
     const metadata = parseRowMetadata(row);
-    if (!defaultMemorySchema.matchesFilter(row, metadata, filter)) continue;
+    if (!defaultMemorySchema.matchesFilter(row, metadata, requestInput)) continue;
 
     candidates.push({ row, metadata, vectorScore: match.score });
     if (candidates.length >= desiredCandidateCount) break;
+  }
+
+  if (candidates.length === 0) {
+    return {
+      ok: true,
+      project_id: requestInput.projectId,
+      namespace: requestInput.namespace,
+      topK: requestedTopK,
+      matches: [],
+    };
   }
 
   if (!rerankConfig) {
     const enrichedMatches = candidates
       .slice(0, requestedTopK)
       .map(({ row, metadata, vectorScore }) => defaultMemorySchema.toSearchMatch(row, vectorScore, metadata));
-    return { ok: true, topK: requestedTopK, matches: enrichedMatches };
+    return {
+      ok: true,
+      project_id: requestInput.projectId,
+      namespace: requestInput.namespace,
+      topK: requestedTopK,
+      matches: enrichedMatches,
+    };
   }
 
   const query = defaultMemorySchema.getQueryText(requestInput);
@@ -89,7 +114,7 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
       query,
       top_k: candidates.length,
       contexts,
-    } as any);
+    } as never);
   } catch (error) {
     throw new Error(`Rerank failed: ${(error as Error).message}`);
   }
@@ -130,6 +155,8 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
 
   return {
     ok: true,
+    project_id: requestInput.projectId,
+    namespace: requestInput.namespace,
     topK: requestedTopK,
     matches: enrichedMatches,
     rerank: {
@@ -139,4 +166,3 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
     },
   };
 }
-

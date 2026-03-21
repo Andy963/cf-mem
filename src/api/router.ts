@@ -1,9 +1,10 @@
 import type { Env } from "../env";
+import type { ProjectScope } from "../project";
 import { handleEmbeddingRequest, isEmbeddingPath } from "./embedding";
 import { handleMemoryRequest } from "./memory";
-import { textResponse } from "./http";
+import { jsonResponse, textResponse } from "./http";
 
-export async function routeRequest(request: Request, env: Env): Promise<Response> {
+export async function routeRequest(request: Request, env: Env, projectScope?: ProjectScope): Promise<Response> {
   const url = new URL(request.url);
   const method = request.method.toUpperCase();
 
@@ -12,7 +13,11 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
   }
 
   if (url.pathname.startsWith("/memory/")) {
-    return await handleMemoryRequest(request, env);
+    if (!projectScope) {
+      return jsonResponse(env, { error: { message: "Project scope is required for memory routes" } }, { status: 500 });
+    }
+
+    return await handleMemoryRequest(request, env, projectScope);
   }
 
   if (method !== "GET" && method !== "POST") {
@@ -21,4 +26,3 @@ export async function routeRequest(request: Request, env: Env): Promise<Response
 
   return textResponse(env, "Not Found", { status: 404 });
 }
-
