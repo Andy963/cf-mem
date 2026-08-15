@@ -6,6 +6,7 @@ import { syncClaimVector } from "./claim-index";
 import { ClaimSchemaError, normalizeClaimMutationRequest } from "./claims";
 import { indexMemoryItems } from "./indexer";
 import { defaultMemorySchema, deriveSegmentIdSuffix } from "./schema";
+import { chunkArray } from "../utils";
 
 const MAX_TEXT_LENGTH = 8_000;
 const MAX_SOURCE_APP_LENGTH = 64;
@@ -18,6 +19,10 @@ const EXTRACTOR_TIMEOUT_MS = 60_000;
 const PROFILE_EVIDENCE_HASH_CHARS = 40;
 const MAX_ACTIVE_OWNER_CLAIMS = 200;
 const MAX_INACTIVE_OWNER_CLAIMS = 50;
+const DEFAULT_BATCH_MAX_CHARS = 10_000;
+const DEFAULT_BATCH_IDLE_MS = 900_000;
+const MAX_FLUSH_BATCHES_PER_GROUP = 4;
+const INBOX_DELETE_CHUNK_SIZE = 50;
 
 type JobStatus = "pending" | "processing" | "completed" | "failed" | "dead";
 
@@ -776,7 +781,20 @@ async function failJob(env: Env, job: ProfileJob, error: unknown): Promise<void>
   ).bind(status, errorLabel(error), now + retryDelayMs(job.attempt_count), now, job.id, job.lease_token).run();
 }
 
-export async function enqueueProfileIngest(env: Env, scope: ProjectScope, body: unknown): Promise<{ jobId: string }> {
+function evidenceGroupKey(input: { ownerId: string; sourceApp: string; externalSessionId: string; workspaceId: string | null }): string {
+  return [input.ownerId, input.sourceApp, input.externalSessionId, input.workspaceId ?? ""].join("\n");
+}
+
+/**
+ * Appends evidence to the buffer instead of creating one extraction job per
+ * message. The cron sweep decides where a batch ends, so the extractor sees a
+ * whole span of conversation rather than a single isolated turn.
+ */
+export async function enqueueProfileIngest(
+  env: Env,
+  scope: ProjectScope,
+  body: unknown,
+): Promise<{ evidenceId: string; buffered: true }> {
   requirePersonalProject(env, scope);
   const input = parseIngestInput(body);
   const ownerId = configuredOwner(env);
@@ -796,16 +814,72 @@ export async function enqueueProfileIngest(env: Env, scope: ProjectScope, body: 
     },
   }], scope);
   const indexed = await indexMemoryItems(env, prepared);
+  const segmentId = indexed.ids[0];
+  const now = Date.now();
+  // The segment id already encodes the ingest idempotency key, so re-posting the
+  // same text is a no-op rather than a duplicate buffer entry.
+  await env.DB.prepare(
+    "INSERT OR IGNORE INTO profile_evidence_inbox (id, project_id, group_key, owner_id, source_app, external_session_id, workspace_id, char_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).bind(
+    segmentId,
+    scope.projectId,
+    evidenceGroupKey({ ownerId, sourceApp: input.sourceApp, externalSessionId: input.externalSessionId, workspaceId: input.workspaceId }),
+    ownerId,
+    input.sourceApp,
+    input.externalSessionId,
+    input.workspaceId,
+    // Only the `[user]` payload survives userOriginatedText, so budget on that.
+    input.text.length,
+    now,
+  ).run();
+  return { evidenceId: segmentId, buffered: true };
+}
+
+/**
+ * Creates one extraction job covering a whole batch of evidence. The
+ * idempotency key is derived from the sorted evidence ids, so re-flushing the
+ * same batch collapses onto the existing job.
+ */
+async function createExtractionJob(
+  env: Env,
+  projectId: string,
+  batch: {
+    evidenceSegmentIds: string[];
+    ownerId: string;
+    sourceApp: string;
+    externalSessionId: string;
+    workspaceId: string | null;
+  },
+): Promise<string> {
+  const idempotencyKey = await sha256Hex([
+    batch.sourceApp,
+    batch.externalSessionId,
+    batch.ownerId,
+    batch.workspaceId ?? "",
+    ...[...batch.evidenceSegmentIds].sort(),
+  ].join("\n"));
   const now = Date.now();
   const jobId = `profile_job_${crypto.randomUUID()}`;
   await env.DB.prepare(
     "INSERT OR IGNORE INTO profile_extraction_jobs (id, project_id, evidence_segment_id, evidence_segment_ids_json, owner_id, source_app, workspace_id, idempotency_key, status, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)",
-  ).bind(jobId, scope.projectId, indexed.ids[0], JSON.stringify(indexed.ids), ownerId, input.sourceApp, input.workspaceId, idempotencyKey, now, now, now).run();
+  ).bind(
+    jobId,
+    projectId,
+    batch.evidenceSegmentIds[0],
+    JSON.stringify(batch.evidenceSegmentIds),
+    batch.ownerId,
+    batch.sourceApp,
+    batch.workspaceId,
+    idempotencyKey,
+    now,
+    now,
+    now,
+  ).run();
   const job = await env.DB.prepare(
     "SELECT id FROM profile_extraction_jobs WHERE project_id = ? AND idempotency_key = ?",
-  ).bind(scope.projectId, idempotencyKey).first<{ id: string }>();
-  if (!job) throw new Error("profile_job_not_created");
-  return { jobId: job.id };
+  ).bind(projectId, idempotencyKey).first<{ id: string }>();
+  if (!job) throw new Error("profile_evidence_job_not_created");
+  return job.id;
 }
 
 export async function enqueueEvidenceExtraction(env: Env, scope: ProjectScope, body: unknown): Promise<{ jobId: string }> {
@@ -814,35 +888,14 @@ export async function enqueueEvidenceExtraction(env: Env, scope: ProjectScope, b
   if (evidence.size !== input.evidenceSegmentIds.length) {
     throw new ClaimSchemaError("All evidence_segment_ids must reference memory segments in the authenticated project");
   }
-  const idempotencyKey = await sha256Hex([
-    input.sourceApp,
-    input.externalSessionId,
-    input.userId,
-    input.workspaceId ?? "",
-    ...[...input.evidenceSegmentIds].sort(),
-  ].join("\n"));
-  const now = Date.now();
-  const jobId = `profile_job_${crypto.randomUUID()}`;
-  await env.DB.prepare(
-    "INSERT OR IGNORE INTO profile_extraction_jobs (id, project_id, evidence_segment_id, evidence_segment_ids_json, owner_id, source_app, workspace_id, idempotency_key, status, attempt_count, next_attempt_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)",
-  ).bind(
-    jobId,
-    scope.projectId,
-    input.evidenceSegmentIds[0],
-    JSON.stringify(input.evidenceSegmentIds),
-    input.userId,
-    input.sourceApp,
-    input.workspaceId,
-    idempotencyKey,
-    now,
-    now,
-    now,
-  ).run();
-  const job = await env.DB.prepare(
-    "SELECT id FROM profile_extraction_jobs WHERE project_id = ? AND idempotency_key = ?",
-  ).bind(scope.projectId, idempotencyKey).first<{ id: string }>();
-  if (!job) throw new Error("profile_evidence_job_not_created");
-  return { jobId: job.id };
+  const jobId = await createExtractionJob(env, scope.projectId, {
+    evidenceSegmentIds: input.evidenceSegmentIds,
+    ownerId: input.userId,
+    sourceApp: input.sourceApp,
+    externalSessionId: input.externalSessionId,
+    workspaceId: input.workspaceId,
+  });
+  return { jobId };
 }
 
 export async function processProfileJob(env: Env, id: string): Promise<void> {
@@ -897,6 +950,131 @@ export async function processProfileJob(env: Env, id: string): Promise<void> {
       ).bind(status, Date.now() + retryDelayMs(job.attempt_count), Date.now(), job.id).run();
     }
   }
+}
+
+interface InboxRow {
+  id: string;
+  owner_id: string;
+  source_app: string;
+  external_session_id: string;
+  workspace_id: string | null;
+  char_count: number;
+  created_at: number;
+}
+
+function batchLimits(env: Env): { maxChars: number; maxSegments: number; idleMs: number } {
+  const maxChars = positiveIntEnv(env.PROFILE_BATCH_MAX_CHARS, DEFAULT_BATCH_MAX_CHARS);
+  return {
+    // A batch must still fit MAX_EVIDENCE_CHARS or boundedEvidenceText would
+    // silently drop its tail.
+    maxChars: Math.min(maxChars, MAX_EVIDENCE_CHARS),
+    maxSegments: Math.min(positiveIntEnv(env.PROFILE_BATCH_MAX_SEGMENTS, MAX_EVIDENCE_SEGMENTS), MAX_EVIDENCE_SEGMENTS),
+    idleMs: positiveIntEnv(env.PROFILE_BATCH_IDLE_MS, DEFAULT_BATCH_IDLE_MS),
+  };
+}
+
+function positiveIntEnv(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * Takes the longest prefix that fits both limits. The first row is always taken
+ * so an oversized single entry can never wedge the queue. Look-ahead (rather
+ * than "add then check") keeps every batch under maxChars instead of
+ * overshooting by up to one full message.
+ */
+function takeBatch(rows: InboxRow[], maxChars: number, maxSegments: number): InboxRow[] {
+  const batch: InboxRow[] = [];
+  let chars = 0;
+  for (const row of rows) {
+    if (batch.length >= maxSegments) break;
+    if (batch.length > 0 && chars + row.char_count > maxChars) break;
+    batch.push(row);
+    chars += row.char_count;
+  }
+  return batch;
+}
+
+async function flushEvidenceGroup(
+  env: Env,
+  projectId: string,
+  groupKey: string,
+  now: number,
+  limits: { maxChars: number; maxSegments: number; idleMs: number },
+): Promise<number> {
+  const result = await env.DB.prepare(
+    "SELECT id, owner_id, source_app, external_session_id, workspace_id, char_count, created_at FROM profile_evidence_inbox WHERE project_id = ? AND group_key = ? ORDER BY created_at ASC LIMIT ?",
+  ).bind(projectId, groupKey, limits.maxSegments * MAX_FLUSH_BATCHES_PER_GROUP).all<InboxRow>();
+
+  let pending = result.results;
+  let flushed = 0;
+  while (pending.length > 0 && flushed < MAX_FLUSH_BATCHES_PER_GROUP) {
+    const batch = takeBatch(pending, limits.maxChars, limits.maxSegments);
+    if (batch.length === 0) break;
+    const remaining = pending.slice(batch.length);
+    const batchChars = batch.reduce((sum, row) => sum + row.char_count, 0);
+    // Full means "hit a limit", which includes landing exactly on one. Testing
+    // only `remaining.length > 0` would leave a group whose total is exactly
+    // maxChars sitting until the idle timeout, even though the group-level
+    // HAVING clause already selected it as ready.
+    const isFull = remaining.length > 0
+      || batchChars >= limits.maxChars
+      || batch.length >= limits.maxSegments;
+    // The trailing partial batch waits for the idle timeout, which is what stops
+    // a quiet tail of a conversation from never being extracted at all.
+    const isIdle = now - batch[0].created_at >= limits.idleMs;
+    if (!isFull && !isIdle) break;
+
+    const head = batch[0];
+    await createExtractionJob(env, projectId, {
+      evidenceSegmentIds: batch.map((row) => row.id),
+      ownerId: head.owner_id,
+      sourceApp: head.source_app,
+      externalSessionId: head.external_session_id,
+      workspaceId: head.workspace_id,
+    });
+    for (const idChunk of chunkArray(batch.map((row) => row.id), INBOX_DELETE_CHUNK_SIZE)) {
+      const placeholders = idChunk.map(() => "?").join(",");
+      await env.DB
+        .prepare(`DELETE FROM profile_evidence_inbox WHERE project_id = ? AND id IN (${placeholders})`)
+        .bind(projectId, ...idChunk)
+        .run();
+    }
+    pending = remaining;
+    flushed += 1;
+  }
+  return flushed;
+}
+
+/**
+ * Groups buffered evidence by (owner, source app, session, workspace) and turns
+ * each ready group into extraction jobs. Grouping by session keeps a batch from
+ * straddling two unrelated topics, which would otherwise let the extractor
+ * attach a subject to the wrong conversation.
+ */
+export async function flushReadyEvidenceGroups(env: Env, limit = 20): Promise<{ groups: number; jobs: number }> {
+  const now = Date.now();
+  const limits = batchLimits(env);
+  const groups = await env.DB.prepare(
+    `SELECT project_id, group_key
+     FROM profile_evidence_inbox
+     GROUP BY project_id, group_key
+     HAVING SUM(char_count) >= ? OR COUNT(*) >= ? OR MIN(created_at) <= ?
+     ORDER BY MIN(created_at) ASC
+     LIMIT ?`,
+  ).bind(limits.maxChars, limits.maxSegments, now - limits.idleMs, Math.min(Math.max(limit, 1), 100))
+    .all<{ project_id: string; group_key: string }>();
+
+  let jobs = 0;
+  for (const group of groups.results) {
+    try {
+      jobs += await flushEvidenceGroup(env, group.project_id, group.group_key, now, limits);
+    } catch (error) {
+      console.error(`[profile] flush failed for project ${group.project_id}: ${errorLabel(error)}`);
+    }
+  }
+  return { groups: groups.results.length, jobs };
 }
 
 export async function processProfileJobs(env: Env, limit = 20): Promise<void> {

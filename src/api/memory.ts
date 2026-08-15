@@ -55,7 +55,14 @@ export async function handleMemoryRequest(request: Request, env: Env, projectSco
     }
     try {
       const result = await enqueueProfileIngest(env, projectScope, body);
-      return jsonResponse(env, { ok: true, job_id: result.jobId }, { status: 202 });
+      // Evidence is buffered and batched by the cron flush, so there is no job
+      // id to hand back at ingest time. job_id stays in the payload as an
+      // explicit null to keep the shape stable for existing callers.
+      return jsonResponse(
+        env,
+        { ok: true, evidence_id: result.evidenceId, buffered: result.buffered, job_id: null },
+        { status: 202 },
+      );
     } catch (error) {
       if (error instanceof ClaimSchemaError || error instanceof MemorySchemaError) {
         return invalidRequestResponse(env, error);

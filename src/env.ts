@@ -45,6 +45,9 @@ export interface Env {
   PROFILE_EXTRACTOR_PROTOCOL?: string;
   OPENROUTER_API_BASE?: string;
   PROFILE_CONTEXT_MIN_SCORE?: string;
+  PROFILE_BATCH_MAX_CHARS?: string;
+  PROFILE_BATCH_MAX_SEGMENTS?: string;
+  PROFILE_BATCH_IDLE_MS?: string;
   CORS_ALLOW_ORIGIN?: string;
 
   EMBEDDING_MODEL?: string;

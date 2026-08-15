@@ -116,6 +116,9 @@ npm run deploy
 - `PROFILE_EXTRACTOR_MODEL`（var，抽取必填）：抽取/校验/对齐使用的模型名
 - `PROFILE_EXTRACTOR_API_KEY`（secret，抽取必填）：抽取模型的 API key
 - `PROFILE_CONTEXT_MIN_SCORE`（var，可选）：profile 语义召回的最低相似度，默认 `0.55`
+- `PROFILE_BATCH_MAX_CHARS`（var，可选）：evidence 攒批的字符阈值，默认 `10000`
+- `PROFILE_BATCH_MAX_SEGMENTS`（var，可选）：evidence 攒批的条数阈值，默认 `24`
+- `PROFILE_BATCH_IDLE_MS`（var，可选）：尾批的空闲 flush 超时，默认 `900000`（15 分钟）
 - `CORS_ALLOW_ORIGIN`（var，可选）：默认 `*`
 
 ## 项目隔离模型
@@ -210,7 +213,15 @@ project only:
 }
 ```
 
-It persists an idempotent inbox job and returns `202`. The five-minute Cron claims and processes
+It buffers the evidence and returns `202` with
+`{"ok":true,"evidence_id":"...","buffered":true,"job_id":null}`. Ingest no longer creates one
+extraction job per message: extracting each message in isolation fragmented the context a
+preference is usually expressed across ("还是用 pytest 吧" only makes sense against the preceding
+turn), and cost three model calls per message. Evidence is instead batched — see
+[Evidence batching](#evidence-batching) below. `job_id` remains in the response as an explicit
+`null` so the payload shape stays stable for existing callers.
+
+The five-minute Cron claims and processes
 jobs using D1 leases, exponential backoff, and a bounded attempt count. Keeping the three external
 model calls out of the ingest request prevents a short request lifecycle from stranding a leased
 job. The extractor endpoint, key, model, and fixed personal owner ID are Worker-only bindings:
@@ -244,6 +255,35 @@ bare model inference but is not a direct user statement.
 For mixed conversation segments, the Worker retains only `[user]`-labelled text as extraction evidence.
 Clients neither classify prompts with keywords nor create profile claims directly; they can only read
 final `/memory/context` claims.
+
+### Evidence batching
+
+Buffered evidence lives in `profile_evidence_inbox` and is grouped by
+`(owner_id, source_app, external_session_id, workspace_id)`. Grouping by session keeps a batch from
+straddling two unrelated topics, which would otherwise let the extractor attach a `subject` to the
+wrong conversation.
+
+Each Cron tick flushes a group into one or more extraction jobs. A batch is cut when adding the next
+entry **would** exceed a limit, so a batch never overshoots — overshooting past `MAX_EVIDENCE_CHARS`
+(12000) would make `boundedEvidenceText` silently drop the tail of the batch. A batch ships when:
+
+- it reached the char or segment limit (including landing exactly on it), or
+- its oldest entry has been waiting longer than the idle timeout
+
+The idle timeout is what stops a quiet tail of a conversation from never being extracted — a pure
+size threshold would leave the last few messages buffered forever. Re-posting identical text is a
+no-op: the buffer row is keyed by the evidence segment id, which is itself derived from the ingest
+idempotency key. `POST /memory/forget` also clears matching buffer rows, so a forget request cannot
+leave behind an entry whose evidence segment has already been deleted.
+
+Tuning knobs (all optional vars):
+
+- `PROFILE_BATCH_MAX_CHARS`（默认 `10000`，上限被 `MAX_EVIDENCE_CHARS` 12000 钳制）
+- `PROFILE_BATCH_MAX_SEGMENTS`（默认 `24`，同时也是硬上限）
+- `PROFILE_BATCH_IDLE_MS`（默认 `900000`，即 15 分钟）
+
+时效上界为一个 Cron 周期（5 分钟）加上尾批的空闲等待。需要在明确的会话结束点立即抽取时，改用
+`POST /memory/extraction/ingest` 显式控批。
 
 `POST /memory/extraction/ingest` lets a project client report already indexed evidence to the same
 Worker-owned extractor. It requires `evidence_segment_ids`, `source_app`, `external_session_id`,
@@ -412,3 +452,9 @@ metadata `user_id` 表达式索引。它是纯索引变更，不改数据，但�
 完成的关键。索引表达式必须与查询里的 `CAST(json_extract(metadata_json, '$.user_id') AS TEXT)`
 逐字一致，SQLite 才会命中它。这里的 `CAST` 不能省略：`json_extract` 返回 JSON 原生类型，而
 `user_id` 按约定是 number，去掉 `CAST` 会让它与绑定的 TEXT 参数永远不相等，从而静默漏删。
+
+迁移 `0010_profile_evidence_inbox.sql` 新增 evidence 攒批缓冲表。它只新增表，不改动既有数据。
+应用后 `POST /memory/profile/ingest` 的响应从 `{ok, job_id}` 变为
+`{ok, evidence_id, buffered, job_id: null}`——调用方若依赖 `job_id` 立即拿到 job，需要改为
+通过 `GET /memory/claims` 观察最终结果。迁移前已排队的 `profile_extraction_jobs` 不受影响，
+仍会被 Cron 正常消费。

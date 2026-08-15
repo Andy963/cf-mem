@@ -312,6 +312,17 @@ export async function forgetScopedMemory(
     // idx_memory_segments_metadata_user_id indexes the same CAST expression.
     : "SELECT id FROM memory_segments WHERE project_id = ? AND CAST(json_extract(metadata_json, '$.user_id') AS TEXT) = ? AND deletion_state = 'active'";
   const segments = await env.DB.prepare(segmentSql).bind(projectScope.projectId, options.scopeId).all<{ id: string }>();
+  // Buffered evidence must go too. Its segments are deleted below, so leaving
+  // the buffer rows behind would let the next flush build a job whose evidence
+  // no longer exists — which then burns every retry before being marked dead.
+  // The buffer stores ids and counts only, so the text itself dies with the
+  // segment either way.
+  const inboxSql = options.scopeKind === "session"
+    // Segment session_id is `<source_app>:<external_session_id>`, so the buffer
+    // columns have to be recombined to match what the caller passes in.
+    ? "DELETE FROM profile_evidence_inbox WHERE project_id = ? AND source_app || ':' || external_session_id = ?"
+    : "DELETE FROM profile_evidence_inbox WHERE project_id = ? AND owner_id = ?";
+  await env.DB.prepare(inboxSql).bind(projectScope.projectId, options.scopeId).run();
   const queued = await queueDeletionJobs(
     env.DB,
     [

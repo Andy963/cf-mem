@@ -4,7 +4,7 @@ import { RequestAuthError, resolveProjectScope } from "./auth";
 import { corsHeaders, isAuthorized, jsonResponse, textResponse, unauthorizedResponse } from "./api/http";
 import type { Env } from "./env";
 import { runRetentionSweep } from "./memory/retention";
-import { processProfileJobs } from "./memory/profile";
+import { flushReadyEvidenceGroups, processProfileJobs } from "./memory/profile";
 
 // Each job runs up to three sequential extractor calls with a 60s timeout each,
 // so three jobs is ~9 minutes worst case — within the waitUntil budget, while
@@ -65,14 +65,21 @@ export default {
   },
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
-      Promise.allSettled([runRetentionSweep(env), processProfileJobs(env, PROFILE_JOBS_PER_TICK)]).then((results) => {
-        for (const [index, result] of results.entries()) {
-          if (result.status === "rejected") {
-            const task = index === 0 ? "retention_sweep" : "profile_jobs";
-            console.error(`[cron] ${task} failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+      // Flush runs before processing so evidence that just became ready can be
+      // picked up in the same tick rather than waiting a full cron interval.
+      flushReadyEvidenceGroups(env)
+        .catch((error) => {
+          console.error(`[cron] evidence_flush failed: ${error instanceof Error ? error.message : String(error)}`);
+        })
+        .then(() => Promise.allSettled([runRetentionSweep(env), processProfileJobs(env, PROFILE_JOBS_PER_TICK)]))
+        .then((results) => {
+          for (const [index, result] of results.entries()) {
+            if (result.status === "rejected") {
+              const task = index === 0 ? "retention_sweep" : "profile_jobs";
+              console.error(`[cron] ${task} failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+            }
           }
-        }
-      }),
+        }),
     );
   },
 };
