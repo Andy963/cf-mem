@@ -319,7 +319,8 @@ async function callExtractor(
     "For every candidate include candidate_kind, explicit (boolean), agent_relevance (global_behavior|contextual|none), and evidence_segment_ids.",
     "Only preference, instruction, decision, profile, or task_state candidates may include an operation.",
     "For create include type (preference|instruction|decision|profile|task_state), subject, memory_key, value, canonical_text, confidence 0..1, and applicability.",
-    "Write canonical_text in the same language as the user's explicit message whenever possible. Do not translate a Chinese instruction into English.",
+    "canonical_text and any string value MUST be written in Chinese. Never translate Chinese user evidence into English.",
+    "If an existing claim already captures the same meaning in English, supersede it with a Chinese canonical_text instead of reinforcing the English wording.",
     "For reinforce/retract use claim_id from existing claims. For supersede use replaces_claim_id from existing claims.",
     "Use global only for explicit preferences that apply to every assistant task. Use semantic for contextual durable claims.",
     "Return {\"claims\":[]} when no explicit durable memory exists.",
@@ -349,6 +350,7 @@ async function verifyCandidates(
     "'I think X is better than Y' is an opinion — reject. 'I currently use X' is current_state — reject. 'X is inefficient' is an evaluation — reject.",
     "Reject beliefs, subjective evaluations, descriptions of a current workflow, temporary tasks, and anything that does not alter future assistant behavior.",
     "Accept only an explicit, enduring statement whose category is directly supported by cited user evidence.",
+    "Reject any create/supersede candidate whose canonical_text or string value is not Chinese.",
     "Hold only when evidence is ambiguous and needs explicit user confirmation. Do not rewrite candidates.",
   ].join(" ");
   const input = `Candidates:\n${JSON.stringify(candidates)}\n\nUser evidence:\n${evidenceText}`;
@@ -412,8 +414,8 @@ async function callReconciliation(
     "You are a claim reconciler, not an extractor.",
     "For each NEW candidate, decide only its relationship to EXISTING active claims.",
     "Use keep when the candidate is genuinely new or its original operation is already correct.",
-    "Use reinforce with claim_id when it means the same thing as an existing active claim.",
-    "Use supersede with replaces_claim_id when it explicitly updates or contradicts an existing active claim.",
+    "Use reinforce with claim_id when it means the same thing as an existing active claim and the existing canonical_text is already Chinese.",
+    "Use supersede with replaces_claim_id when it explicitly updates or contradicts an existing active claim, or when the existing claim states the same fact in English and the candidate restates it in Chinese.",
     "Never retract an existing claim. Never invent or rewrite candidate fields. Never reference an id outside EXISTING active claims.",
     "Return strict JSON with shape {\"decisions\":[{\"candidate_index\":0,\"action\":\"keep|reinforce|supersede\",\"claim_id\":\"...\",\"replaces_claim_id\":\"...\",\"reason\":\"...\"}]}.",
     "Return exactly one decision for every NEW candidate.",
@@ -471,6 +473,23 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && Boolean(value.trim());
 }
 
+function containsChinese(value: string): boolean {
+  return /[\u3400-\u9fff]/.test(value);
+}
+
+function stringLeavesContainChinese(value: unknown): boolean {
+  if (typeof value === "string") return containsChinese(value);
+  if (Array.isArray(value)) return value.length === 0 || value.every(stringLeavesContainChinese);
+  if (!value || typeof value !== "object") return true;
+  const leaves = Object.values(value as Record<string, unknown>);
+  return leaves.length === 0 || leaves.every(stringLeavesContainChinese);
+}
+
+function isChineseClaimText(candidate: ExtractedClaim): boolean {
+  if (typeof candidate.canonical_text !== "string" || !containsChinese(candidate.canonical_text)) return false;
+  return stringLeavesContainChinese(candidate.value);
+}
+
 /**
  * Timestamps must be future Unix milliseconds. Models routinely emit seconds
  * instead, which used to sail through validation and create a claim that was
@@ -506,7 +525,7 @@ function eligibleCandidate(candidate: ExtractedClaim): boolean {
   // still has to be checked against the allowed set explicitly.
   if (typeof candidate.type !== "string" || !CLAIM_TYPES.has(candidate.type)) return false;
   if (!isNonEmptyString(candidate.subject) || !isNonEmptyString(candidate.memory_key)) return false;
-  if (!isNonEmptyString(candidate.canonical_text)) return false;
+  if (!isNonEmptyString(candidate.canonical_text) || !isChineseClaimText(candidate)) return false;
   if (candidate.value === undefined) return false;
   if (typeof candidate.confidence !== "number" || !Number.isFinite(candidate.confidence)) return false;
   if (candidate.confidence < 0 || candidate.confidence > 1) return false;
@@ -555,11 +574,16 @@ function reconcileAcceptedCandidates(
   }
   if (decisionByIndex.size !== accepted.length) throw new Error("reconciler_response_incomplete_decisions");
 
+  const activeById = new Map(activeClaims.filter((claim) => claim.status === "active").map((claim) => [claim.id, claim]));
   return accepted.map((candidate, index) => {
     const decision = decisionByIndex.get(index) as ReconciliationDecision;
     if (decision.action === "keep") return candidate;
     if (decision.action === "reinforce") {
       if (!decision.claim_id || !activeIds.has(decision.claim_id)) throw new Error("reconciler_response_invalid_claim_id");
+      const existing = activeById.get(decision.claim_id);
+      if (existing && !containsChinese(existing.canonical_text) && isChineseClaimText(candidate)) {
+        return { ...candidate, operation: "supersede", replaces_claim_id: decision.claim_id, claim_id: undefined };
+      }
       return { ...candidate, operation: "reinforce", claim_id: decision.claim_id, replaces_claim_id: undefined };
     }
     if (!decision.replaces_claim_id || !activeIds.has(decision.replaces_claim_id)) {
@@ -581,7 +605,7 @@ async function recordCandidateVerdicts(
     const verdict = verdictByIndex.get(index);
     const status = candidateAccepted(candidate, index, verdictByIndex, job)
       ? "accepted"
-      : verdict?.verdict === "hold" ? "held" : "rejected";
+      : verdict?.verdict === "hold" && eligibleCandidate(candidate) ? "held" : "rejected";
     return env.DB.prepare(
       "INSERT INTO memory_extraction_candidates (id, project_id, job_id, status, candidate_json, verifier_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, candidate_json = excluded.candidate_json, verifier_json = excluded.verifier_json, updated_at = excluded.updated_at",
     ).bind(

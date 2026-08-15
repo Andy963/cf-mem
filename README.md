@@ -233,6 +233,8 @@ Any candidate carrying a `valid_until` must express it as future Unix millisecon
 second-resolution value is rejected instead of producing a claim that is stored yet already expired.
 A candidate missing any field the pipeline consumes (`type`, `subject`, `memory_key`,
 `canonical_text`, `value`, `confidence`) is recorded as `rejected` rather than aborting the job.
+`canonical_text` and any string `value` must contain Chinese; an English restatement of Chinese
+evidence is rejected, and an English active claim is superseded instead of reinforced.
 Per-candidate failures are isolated: the job completes with the failures recorded in `last_error`,
 because retrying the same prompt would only reproduce the same malformed candidate. Only
 infrastructure failures (extractor call, D1, missing evidence) retry with backoff.
