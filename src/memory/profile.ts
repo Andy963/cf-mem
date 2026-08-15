@@ -179,7 +179,7 @@ type ExtractorProtocol = "chat_completions" | "responses";
 
 function extractorConfig(env: Env): { endpoint: string; apiKey: string; model: string; protocol: ExtractorProtocol } {
   const protocol = env.PROFILE_EXTRACTOR_PROTOCOL?.trim() || "chat_completions";
-  const rawEndpoint = env.PROFILE_EXTRACTOR_ENDPOINT?.trim().replace(/\/+$/, "");
+  const rawEndpoint = (env.PROFILE_EXTRACTOR_ENDPOINT?.trim() || env.OPENROUTER_API_BASE?.trim() || "").replace(/\/+$/, "");
   const apiKey = env.PROFILE_EXTRACTOR_API_KEY?.trim();
   const model = env.PROFILE_EXTRACTOR_MODEL?.trim();
   if (!rawEndpoint || !apiKey || !model) throw new Error("Profile extractor is not configured");

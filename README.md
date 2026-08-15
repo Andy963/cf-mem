@@ -111,6 +111,10 @@ npm run deploy
 - `RERANK_MODEL`（var，可选）：默认 `@cf/baai/bge-reranker-base`
 - `RERANK_DEFAULT_ENABLED`（var，可选）：默认 `false`；设为 `true` 可让 `/memory/search` 默认启用 rerank
 - `PROFILE_EXTRACTOR_PROTOCOL`（var，可选）：`chat_completions`（默认）或 `responses`
+- `PROFILE_EXTRACTOR_ENDPOINT`（var 或 secret，抽取必填）：OpenAI 兼容接口的 base URL，例如 `https://openrouter.ai/api/v1`
+- `OPENROUTER_API_BASE`（var，可选）：`PROFILE_EXTRACTOR_ENDPOINT` 未设置时的回退 base URL
+- `PROFILE_EXTRACTOR_MODEL`（var，抽取必填）：抽取/校验/对齐使用的模型名
+- `PROFILE_EXTRACTOR_API_KEY`（secret，抽取必填）：抽取模型的 API key
 - `PROFILE_CONTEXT_MIN_SCORE`（var，可选）：profile 语义召回的最低相似度，默认 `0.55`
 - `CORS_ALLOW_ORIGIN`（var，可选）：默认 `*`
 
@@ -212,7 +216,7 @@ model calls out of the ingest request prevents a short request lifecycle from st
 job. The extractor endpoint, key, model, and fixed personal owner ID are Worker-only bindings:
 
 ```text
-PROFILE_EXTRACTOR_ENDPOINT
+PROFILE_EXTRACTOR_ENDPOINT   # or OPENROUTER_API_BASE as a fallback
 PROFILE_EXTRACTOR_API_KEY
 PROFILE_EXTRACTOR_MODEL
 PERSONAL_MEMORY_OWNER_ID

@@ -43,6 +43,7 @@ export interface Env {
   PROFILE_EXTRACTOR_API_KEY?: string;
   PROFILE_EXTRACTOR_MODEL?: string;
   PROFILE_EXTRACTOR_PROTOCOL?: string;
+  OPENROUTER_API_BASE?: string;
   PROFILE_CONTEXT_MIN_SCORE?: string;
   CORS_ALLOW_ORIGIN?: string;
 
