@@ -1,8 +1,15 @@
-import { RequestAuthError, resolveProjectScope } from "./auth";
 import { handleEmbeddingRequest, isEmbeddingPath } from "./api/embedding";
 import { handleMemoryRequest } from "./api/memory";
+import { RequestAuthError, resolveProjectScope } from "./auth";
 import { corsHeaders, isAuthorized, jsonResponse, textResponse, unauthorizedResponse } from "./api/http";
 import type { Env } from "./env";
+import { runRetentionSweep } from "./memory/retention";
+import { processProfileJobs } from "./memory/profile";
+
+// Each job runs up to three sequential extractor calls with a 60s timeout each,
+// so three jobs is ~9 minutes worst case — within the waitUntil budget, while
+// lifting throughput from 12 to 36 jobs/hour at the current 5-minute cron.
+const PROFILE_JOBS_PER_TICK = 3;
 
 function getRequiredApiToken(env: Pick<Env, "API_TOKEN">): string | null {
   const token = env.API_TOKEN?.trim();
@@ -23,7 +30,6 @@ export default {
       if (!apiToken) {
         return jsonResponse(env, { error: { message: "API_TOKEN is required" } }, { status: 500 });
       }
-
       if (!isAuthorized(request, apiToken)) {
         return unauthorizedResponse(env, "cf-rag");
       }
@@ -41,7 +47,10 @@ export default {
             return unauthorizedResponse(env, "cf-rag-memory");
           }
 
-          return jsonResponse(env, { error: { message: error.message } }, { status: error.status });
+          // Server-side auth errors describe the deployment's secrets, so the
+          // detail goes to the log and the caller gets a generic message.
+          console.error(`[auth] ${error.message}`);
+          return jsonResponse(env, { error: { message: "Memory authentication is misconfigured" } }, { status: error.status });
         }
 
         throw error;
@@ -53,5 +62,17 @@ export default {
     }
 
     return textResponse(env, "Not Found", { status: 404 });
+  },
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      Promise.allSettled([runRetentionSweep(env), processProfileJobs(env, PROFILE_JOBS_PER_TICK)]).then((results) => {
+        for (const [index, result] of results.entries()) {
+          if (result.status === "rejected") {
+            const task = index === 0 ? "retention_sweep" : "profile_jobs";
+            console.error(`[cron] ${task} failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
+          }
+        }
+      }),
+    );
   },
 };

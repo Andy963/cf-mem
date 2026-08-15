@@ -16,6 +16,10 @@ database_id = "<YOUR_D1_DATABASE_ID>"
 binding = "SEGMENTS_INDEX"
 index_name = "cf-vector"
 
+[[vectorize]]
+binding = "CLAIMS_INDEX"
+index_name = "cf-claims"
+
 # Optional: bind a custom domain route (uncomment and edit).
 #
 # [[routes]]
@@ -30,3 +34,6 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # RERANK_DEFAULT_ENABLED = "true"
 # /memory/* requires a PROJECT_TOKENS_JSON secret such as:
 # {"proj-a":"token-for-a","proj-b":"token-for-b"}
+
+[triggers]
+crons = ["*/5 * * * *"]

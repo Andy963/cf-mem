@@ -1,5 +1,13 @@
 import type { Primitive } from "../env";
-import { normalizeProjectId, scopeSegmentId, type ProjectScope } from "../project";
+import {
+  availableSegmentIdBytes,
+  MAX_VECTOR_ID_BYTES,
+  normalizeProjectId,
+  scopeSegmentId,
+  vectorIdByteLength,
+  type ProjectScope,
+} from "../project";
+import { clampInt } from "../utils";
 
 export class MemorySchemaError extends Error {
   constructor(message: string) {
@@ -64,12 +72,38 @@ function isIndexItemInput(value: unknown): value is IndexItemInput {
   return true;
 }
 
+/**
+ * Index requests used to silently drop malformed entries, so a caller sending 10
+ * items could get back "8 indexed" with no indication that 2 were discarded.
+ */
+function requireIndexItemInput(value: unknown, index: number): IndexItemInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MemorySchemaError(`items[${index}] must be an object`);
+  }
+
+  const record = value as Record<string, unknown>;
+  if (typeof record.text !== "string") throw new MemorySchemaError(`items[${index}].text must be a string`);
+  if (record.id !== undefined && typeof record.id !== "string") {
+    throw new MemorySchemaError(`items[${index}].id must be a string`);
+  }
+  if (record.metadata !== undefined && (typeof record.metadata !== "object" || record.metadata === null || Array.isArray(record.metadata))) {
+    throw new MemorySchemaError(`items[${index}].metadata must be an object`);
+  }
+
+  return value as IndexItemInput;
+}
+
 function safeString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 const FILTERED_CANDIDATE_MULTIPLIER = 10;
 const MAX_VECTOR_QUERY_TOP_K = 100;
+
+const DERIVED_ID_PREFIX = "seg_";
+const DERIVED_ID_HASH_CHARS = 32;
+// 64 bits of digest is still collision-safe within a single project namespace.
+const MIN_DERIVED_HASH_CHARS = 16;
 
 function sanitizeFilter(filter: Record<string, Primitive> | undefined, projectId: string): Record<string, Primitive> | undefined {
   if (!filter) return undefined;
@@ -103,11 +137,6 @@ function buildVectorMetadata(metadata?: Record<string, unknown>): Record<string,
   return Object.keys(projected).length > 0 ? projected : undefined;
 }
 
-function clampInt(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return min;
-  return Math.max(min, Math.min(max, Math.trunc(value)));
-}
-
 async function sha256Hex(input: string): Promise<string> {
   const data = new TextEncoder().encode(input);
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -124,17 +153,48 @@ function mergeProjectMetadata(metadata: Record<string, unknown> | undefined, pro
   return merged;
 }
 
+/**
+ * Narrows a hex digest to whatever MAX_VECTOR_ID_BYTES leaves after the
+ * `project:<id>:<prefix>` header. Project ids up to the 32-char cap always leave
+ * at least MIN_DERIVED_HASH_CHARS, so this only ever narrows below the requested
+ * width for ids that could not be indexed at all before. Returns the unscoped
+ * suffix — callers that need a vector id still go through scopeSegmentId.
+ */
+export function deriveSegmentIdSuffix(
+  projectScope: ProjectScope,
+  prefix: string,
+  hash: string,
+  preferredHashChars: number,
+): string {
+  const available = availableSegmentIdBytes(projectScope, prefix);
+  const hashChars = Math.min(preferredHashChars, hash.length, available);
+  if (hashChars < MIN_DERIVED_HASH_CHARS) {
+    throw new MemorySchemaError(
+      `project_id "${projectScope.projectId}" is too long to derive a segment id within the ${MAX_VECTOR_ID_BYTES}-byte vector id limit`,
+    );
+  }
+
+  return `${prefix}${hash.slice(0, hashChars)}`;
+}
+
 async function resolveItemId(item: IndexItemInput, metadata: Record<string, unknown>, projectScope: ProjectScope): Promise<string> {
   const explicitId = item.id?.trim();
   if (explicitId) {
-    return scopeSegmentId(projectScope, explicitId);
+    const scopedId = scopeSegmentId(projectScope, explicitId);
+    const byteLength = vectorIdByteLength(scopedId);
+    if (byteLength > MAX_VECTOR_ID_BYTES) {
+      throw new MemorySchemaError(
+        `id is too long: "${scopedId}" is ${byteLength} bytes once scoped to the project, exceeding the ${MAX_VECTOR_ID_BYTES}-byte vector id limit`,
+      );
+    }
+    return scopedId;
   }
 
   const sessionId = safeString(metadata.session_id) ?? "";
   const tape = safeString(metadata.tape) ?? "";
   const basis = `${projectScope.projectId}\n${sessionId}\n${tape}\n${item.text}`;
   const hash = await sha256Hex(basis);
-  return scopeSegmentId(projectScope, `seg_${hash.slice(0, 32)}`);
+  return scopeSegmentId(projectScope, deriveSegmentIdSuffix(projectScope, DERIVED_ID_PREFIX, hash, DERIVED_ID_HASH_CHARS));
 }
 
 function getByPath(source: unknown, path: string): unknown {
@@ -162,13 +222,13 @@ function matchesPrimitive(actual: unknown, expected: Primitive): boolean {
 export const defaultMemorySchema: MemoryShapeAdapter = {
   normalizeIndexRequest(body: unknown): IndexItemInput[] {
     if (Array.isArray(body)) {
-      return body.filter(isIndexItemInput);
+      return body.map(requireIndexItemInput);
     }
 
     if (body && typeof body === "object") {
       const record = body as Record<string, unknown>;
       if (Array.isArray(record.items)) {
-        return record.items.filter(isIndexItemInput);
+        return record.items.map(requireIndexItemInput);
       }
     }
 

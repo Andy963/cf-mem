@@ -37,19 +37,30 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
   const filter = defaultMemorySchema.getFilter(requestInput);
   const [queryVector] = await embedTexts(env, [defaultMemorySchema.getQueryText(requestInput)]);
 
-  let queryResult = await env.SEGMENTS_INDEX.query(queryVector, {
+  const queryResult = await env.SEGMENTS_INDEX.query(queryVector, {
     topK: candidateTopK,
     namespace: requestInput.namespace,
     filter,
   });
-  let rawMatches = toQueryMatches(queryResult);
+  const rawMatches = [...toQueryMatches(queryResult)];
 
+  // A filtered query only returns hits when Vectorize has a metadata index for
+  // those properties. Fall back to an unfiltered query and let the D1-side
+  // matchesFilter do the work — but merge, never replace: the filtered hits are
+  // exactly the ones most likely to survive filtering, and dropping them made
+  // recall worse than not falling back at all.
   if (filter && rawMatches.length < requestedTopK) {
-    queryResult = await env.SEGMENTS_INDEX.query(queryVector, {
+    const unfilteredResult = await env.SEGMENTS_INDEX.query(queryVector, {
       topK: candidateTopK,
       namespace: requestInput.namespace,
     });
-    rawMatches = toQueryMatches(queryResult);
+    const seenIds = new Set(rawMatches.map((match) => match.id));
+    for (const match of toQueryMatches(unfilteredResult)) {
+      if (typeof match.id !== "string" || seenIds.has(match.id)) continue;
+      seenIds.add(match.id);
+      rawMatches.push(match);
+    }
+    rawMatches.sort((a, b) => (b.score ?? Number.NEGATIVE_INFINITY) - (a.score ?? Number.NEGATIVE_INFINITY));
   }
 
   const matches = rawMatches

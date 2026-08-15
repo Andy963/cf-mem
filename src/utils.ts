@@ -25,6 +25,11 @@ export function chunkArray<T>(items: T[], chunkSize: number): T[][] {
 export function truncateText(text: string, maxChars: number): string {
   if (maxChars <= 0) return "";
   if (text.length <= maxChars) return text;
-  return text.slice(0, maxChars);
+
+  const truncated = text.slice(0, maxChars);
+  // Slicing by UTF-16 code unit can land between a surrogate pair and emit a
+  // lone surrogate, which is not valid text for downstream model calls.
+  const lastCode = truncated.charCodeAt(truncated.length - 1);
+  return lastCode >= 0xd800 && lastCode <= 0xdbff ? truncated.slice(0, -1) : truncated;
 }
 

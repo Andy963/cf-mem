@@ -18,6 +18,12 @@
 - `GET /memory/health`
 - `POST /memory/index`
 - `POST /memory/search`
+- `POST /memory/claims`
+- `POST /memory/profile/ingest`
+- `POST /memory/extraction/ingest`
+- `POST /memory/context`
+- `GET /memory/claims`
+- `POST /memory/forget`
 
 ## 快速开始（部署到你的 Cloudflare 账号）
 
@@ -48,6 +54,8 @@ npx wrangler d1 create cf-text
 
 ```bash
 npx wrangler vectorize create cf-vector --dimensions 1024 --metric cosine
+npx wrangler vectorize create cf-claims --dimensions 1024 --metric cosine
+npx wrangler vectorize create-metadata-index cf-claims --property-name status --type string
 ```
 
 初始化 D1 schema（应用全部 migrations）：
@@ -97,8 +105,13 @@ npm run deploy
 - `API_TOKEN`（secret，必填）：embedding 路由的统一鉴权 token
 - `PROJECT_TOKENS_JSON`（secret，必填）：`/memory/*` 的项目级 token 映射；token 只允许访问其绑定项目
 - `EMBEDDING_MODEL`（var，可选）：默认 `@cf/baai/bge-m3`
+- `RAW_MEMORY_RETENTION_DAYS`（var，可选）：raw segment 的保留期，默认 `90`
+- `RAW_MEMORY_MAX_BYTES_PER_PROJECT`（var，可选）：单个 project 的 raw logical-byte 上限，默认 `104857600`（100 MiB）
+- `RAW_MEMORY_TARGET_BYTES_PER_PROJECT`（var，可选）：触发上限后的清理目标，默认 `83886080`（80 MiB）
 - `RERANK_MODEL`（var，可选）：默认 `@cf/baai/bge-reranker-base`
 - `RERANK_DEFAULT_ENABLED`（var，可选）：默认 `false`；设为 `true` 可让 `/memory/search` 默认启用 rerank
+- `PROFILE_EXTRACTOR_PROTOCOL`（var，可选）：`chat_completions`（默认）或 `responses`
+- `PROFILE_CONTEXT_MIN_SCORE`（var，可选）：profile 语义召回的最低相似度，默认 `0.55`
 - `CORS_ALLOW_ORIGIN`（var，可选）：默认 `*`
 
 ## 项目隔离模型
@@ -115,6 +128,17 @@ npm run deploy
 
 - 不同项目不会共享同一个 Vectorize namespace
 - 不同项目不会通过 API 读到彼此的 memory 数据
+
+### project_id 长度约束
+
+Vectorize 的 vector id 上限是 64 字节，而 segment id 的实际形式是
+`project:<project_id>:<segment_id>`，因此 `project_id` 会直接吃掉这个预算：
+
+- `project_id` 最长 **32 字符**，超出的会在解析 `PROJECT_TOKENS_JSON` 时报配置错误
+- 自动派生的 segment id（`seg_<hash>` / `pe_<hash>`）会按剩余预算自动收窄摘要宽度，
+  最短保留 16 个十六进制字符；`project_id` 在 19 字符以内时摘要宽度与旧版完全一致，
+  因此不会改变既有数据的 id
+- 请求体显式传入的 `id` 无法自动收窄，拼接后超过 64 字节会返回 `400` 并说明实际字节数
 - 相同的业务 id 进入存储前也会被自动加上项目作用域，避免跨项目覆盖
 
 ## 代码结构（src）
@@ -147,6 +171,79 @@ src/
 - `session_id` / `tape`：常用过滤列
 - `content_hash`：用于避免重复 embedding/写入
 - `created_at` / `updated_at`：毫秒时间戳
+- `expires_at`：raw segment 的 TTL 截止时间
+- `deletion_state`：`active` 或等待 vector 删除完成的 `pending_delete`
+
+## Retention 与删除
+
+Worker 每五分钟运行一次 Cron sweep。它会删除过期、且不再支撑 active claim 的 raw
+segments，并同步删除 `cf-vector` 中的同 ID vector。同一次 sweep 也会检查每个 project 的
+logical-byte 上限，超限时从最旧的可删除 segment 开始清理到目标水位。
+
+配额检查不再挂在 `/memory/index` 的写路径上：它需要扫描该 project 的全部活跃 segment
+（`SUM(LENGTH(...))` 加上逐行的 evidence join），放在写路径会随数据量线性拖慢写入。代价是
+配额执行最多滞后一个 Cron 周期（5 分钟）。
+
+删除通过 D1 `memory_deletion_jobs` outbox 执行：先将 segment 标记为不可检索，再删除
+Vectorize vector，最后删除 D1 row；待删除 claim 会立即 retract，避免其在重试期间继续注入上下文。
+Vectorize 暂时失败会保留 job 并由下一次 Cron sweep 自动重试。
+这只使用 Worker 的 D1/Vectorize bindings，不需要 Whisper 持有 Cloudflare 管理 API token。
+
+`POST /memory/forget` 提供项目内的 user 或 session scope 删除，业务调用方必须在自己的认证层
+验证该 scope 属于当前用户。Whisper Telegram 仅在 private chat 中公开 `/forget CONFIRM` 与
+`/forget_all CONFIRM`，并使用既有项目 token 调用此业务 API。
+
+## Shared profile extraction
+
+`POST /memory/profile/ingest` accepts bounded user evidence from the authenticated `personal`
+project only:
+
+```json
+{
+  "text": "I prefer concise replies.",
+  "source_app": "codex",
+  "external_session_id": "session-123"
+}
+```
+
+It persists an idempotent inbox job and returns `202`. The five-minute Cron claims and processes
+jobs using D1 leases, exponential backoff, and a bounded attempt count. Keeping the three external
+model calls out of the ingest request prevents a short request lifecycle from stranding a leased
+job. The extractor endpoint, key, model, and fixed personal owner ID are Worker-only bindings:
+
+```text
+PROFILE_EXTRACTOR_ENDPOINT
+PROFILE_EXTRACTOR_API_KEY
+PROFILE_EXTRACTOR_MODEL
+PERSONAL_MEMORY_OWNER_ID
+```
+
+The extractor must be OpenAI Chat Completions compatible. It runs candidate extraction, independent
+promotion verification, then reconciliation against existing active claims. Reconciliation only
+keeps, reinforces, or supersedes an evidence-backed accepted candidate; it cannot independently
+retract an existing claim or rewrite candidate fields. Candidate and verdict records are auditable
+in D1; only accepted, explicit, agent-relevant candidates can become active claims. Opinions,
+subjective evaluations, and current-workflow descriptions are rejected rather than reclassified as
+preferences. Accepted `task_state` candidates must also carry a future expiry time.
+Any candidate carrying a `valid_until` must express it as future Unix milliseconds; a past or
+second-resolution value is rejected instead of producing a claim that is stored yet already expired.
+A candidate missing any field the pipeline consumes (`type`, `subject`, `memory_key`,
+`canonical_text`, `value`, `confidence`) is recorded as `rejected` rather than aborting the job.
+Per-candidate failures are isolated: the job completes with the failures recorded in `last_error`,
+because retrying the same prompt would only reproduce the same malformed candidate. Only
+infrastructure failures (extractor call, D1, missing evidence) retry with backoff.
+Claims created by this pipeline are stored with `provenance = user_confirmed`: they passed an
+explicit-marking extractor, an independent verifier, and reconciliation, which is stronger than a
+bare model inference but is not a direct user statement.
+For mixed conversation segments, the Worker retains only `[user]`-labelled text as extraction evidence.
+Clients neither classify prompts with keywords nor create profile claims directly; they can only read
+final `/memory/context` claims.
+
+`POST /memory/extraction/ingest` lets a project client report already indexed evidence to the same
+Worker-owned extractor. It requires `evidence_segment_ids`, `source_app`, `external_session_id`,
+and `user_id`. Every referenced segment must belong to the authenticated project. This is the
+integration endpoint for services such as Whisper: they report evidence but never invoke an LLM or
+call `POST /memory/claims` for automated extraction.
 
 ## Vectorize metadata / namespace
 
@@ -171,6 +268,11 @@ npx wrangler vectorize create-metadata-index cf-vector --property-name project_i
 npx wrangler vectorize create-metadata-index cf-vector --property-name session_id --type string
 npx wrangler vectorize create-metadata-index cf-vector --property-name tape --type string
 ```
+
+没有 metadata index 时，带 `filter` 的向量查询召回会不足。此时 `/memory/search` 会补一次
+不带 filter 的查询，**按 id 合并**两次结果后再由 D1 侧统一做精确过滤——而不是丢弃第一次的
+命中。第一次查询返回的正是最可能通过过滤的那批向量，直接覆盖会让召回反而低于不回退。
+无论走哪条路径，D1 侧过滤都保证结果不会跨出 filter 与鉴权项目。
 
 ## 调用示例
 
@@ -203,6 +305,10 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
   -d '{"text":"hello world","metadata":{"session_id":"s1","tape":"t1","kind":"note"}}'
 ```
 
+`items` 数组中任何一条格式不合法（`text` 非字符串、`id` 非字符串、`metadata` 非对象）都会
+返回 `400` 并指出具体下标，例如 `items[2].text must be a string`。此前这类条目会被静默丢弃，
+调用方会收到一个看起来成功、但少了几条的结果。
+
 Search memory：
 
 ```bash
@@ -229,6 +335,62 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
 - `rerank_score`：reranker 分数
 - `score`：最终用于排序的分数（优先使用 `rerank_score`，否则回退到 `vector_score`）
 
+## 持久记忆（Claims）
+
+`memory_segments` 继续保存可追溯的原始证据。持久偏好、指令、决定、档案和任务状态保存在独立的
+`memory_claims` 表，并用 `memory_evidence` 链接到其源 segment。
+
+详细的数据模型、变更规则和后续阶段见
+[`docs/durable-memory-design.md`](docs/durable-memory-design.md)。
+
+`POST /memory/claims` 只接受受限操作：
+
+- `create`：创建新 claim。`model_inferred` 来源会以 `proposed` 状态保存，不能成为注入上下文的长期记忆。
+- `reinforce`：为现有 active claim 增加证据，并可提高置信度。
+- `supersede`：创建替代 claim，将同一 canonical key 的旧 active claim 标记为 `superseded`。
+- `retract`：将指定 active claim 标记为 `retracted`。
+
+显式用户来源的 claim 必须提供同项目中已有的 `evidence_segment_ids`。例如：
+
+```json
+{
+  "operation": "create",
+  "claim": {
+    "scope_kind": "user",
+    "scope_id": "user-123",
+    "type": "preference",
+    "subject": "response",
+    "memory_key": "response.language",
+    "value": "zh-CN",
+    "canonical_text": "用户偏好使用中文回复。",
+    "provenance": "user_explicit",
+    "confidence": 0.98,
+    "evidence_segment_ids": ["project:proj-a:seg_abc"]
+  }
+}
+```
+
+`POST /memory/context` 按用户、项目和会话 scope 返回当前有效的 active claims，并包含 source
+segment ids。若传入 `query`，Worker 会把固定 scope 内存与专用 claim 向量索引的语义命中合并。
+它用于 Agent 每轮开始前加载受限、结构化的记忆上下文：
+
+```json
+{
+  "user_id": "user-123",
+  "session_id": "session-456",
+  "query": "当前回复应该使用什么语言？",
+  "types": ["preference", "instruction"],
+  "limit": 20
+}
+```
+
+`GET /memory/claims` 用于审计和管理当前提炼出的记忆。它仍受项目 token 保护，可按
+`scope_kind`、`scope_id`、`status` 和 `limit` 过滤：
+
+```text
+GET /memory/claims?scope_kind=user&scope_id=user-123&status=active&limit=100
+```
+
 ## 升级注意事项
 
 如果你是从旧版 `cf-rag` 升级：
@@ -238,3 +400,9 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
 3. 旧数据如果之前没有 `project_id` 或仍在 Vectorize 默认 namespace，需要按项目重新走一次 `/memory/index`，把向量写入新的 `project:<project_id>` namespace
 
 也就是说，这次升级会把 memory 从“共享池”切到“项目级命名空间”；只有完成 reindex 的项目，才能在新隔离模型下被 `/memory/search` 查到。
+
+迁移 `0009_segment_user_id_index.sql` 为 `POST /memory/forget` 的 user scope 删除补上了
+metadata `user_id` 表达式索引。它是纯索引变更，不改数据，但在大项目上是该接口能否在超时前
+完成的关键。索引表达式必须与查询里的 `CAST(json_extract(metadata_json, '$.user_id') AS TEXT)`
+逐字一致，SQLite 才会命中它。这里的 `CAST` 不能省略：`json_extract` 返回 JSON 原生类型，而
+`user_id` 按约定是 number，去掉 `CAST` 会让它与绑定的 TEXT 参数永远不相等，从而静默漏删。
