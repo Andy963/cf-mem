@@ -43,6 +43,9 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # Profile extractor also needs secrets:
 #   PROFILE_EXTRACTOR_API_KEY
 #   PROFILE_EXTRACTOR_ENDPOINT  (optional if OPENROUTER_API_BASE is set)
+# Web extraction via the Tavily relay also needs secrets:
+#   TAVILY_API_TOKEN  (the tavily-worker ingress token)
+#   TAVILY_BASE_URL   (for example https://tavily.example.com)
 
 [triggers]
 crons = ["*/5 * * * *"]

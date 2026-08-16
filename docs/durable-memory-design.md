@@ -126,6 +126,30 @@ second vector index.
 5. Use only user-labelled portions of mixed conversation segments as extraction evidence, and reject
    candidates that do not cite one of the queued evidence segment ids.
 
+### Phase 2b: Worker-side link fetching
+
+Links inside user evidence are resolved by the Worker itself (the "Worker fetch" option of the
+link-content design), not by each submit client. Chosen because pages behind a login or on a
+private network are explicitly out of scope; without that requirement, client-side fetching buys
+nothing and costs one implementation per client.
+
+1. Strip client-inlined `<referenced_web_content>` blocks at ingest and neutralize line-leading
+   role markers, so the trust delimiter is always one the Worker wrote and can verify.
+2. Fetch links at flush time, once per batch: no client latency, no refetch on job retry, and one
+   fetch per distinct URL in the batch.
+3. Store each page as its own `kind: "web_reference"` segment carrying `source_url`, `final_url`,
+   `fetched_at`, `fetch_provider`, and `content_hash`. The segment id is derived from URL plus
+   content hash, so a changed page becomes a new segment instead of rewriting evidence an existing
+   claim already cites.
+4. Budget user speech and fetched pages separately (12000 / 6000 characters), and count only user
+   speech toward the batching threshold, so one link cannot consume a whole batch.
+5. Require every accepted candidate to cite at least one `kind: "user"` segment. A page instructing
+   the reader to "always answer in English" therefore cannot promote itself into a claim.
+
+Fetching is guarded against SSRF (scheme, port, credential, private-address, and per-hop redirect
+checks). Workers cannot resolve DNS before fetching, so a public hostname that resolves to a private
+address is a known, accepted gap.
+
 ### Phase 3: Semantic durable-memory retrieval
 
 1. Add a dedicated `CLAIMS_INDEX` Vectorize binding and
@@ -160,6 +184,7 @@ and context-token budget.
 - [x] Phase 1.4 deterministic context API
 - [x] Phase 1.5 type-check
 - [x] Phase 2 extraction producer
+- [x] Phase 2b Worker-side link fetching
 - [x] Phase 3 semantic claim index
 - [x] Phase 4 Whisper integration
 - [ ] Phase 5 evaluation and operations

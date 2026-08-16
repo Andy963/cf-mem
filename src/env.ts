@@ -56,4 +56,7 @@ export interface Env {
   RAW_MEMORY_RETENTION_DAYS?: string;
   RAW_MEMORY_MAX_BYTES_PER_PROJECT?: string;
   RAW_MEMORY_TARGET_BYTES_PER_PROJECT?: string;
+
+  TAVILY_API_TOKEN?: string;
+  TAVILY_BASE_URL?: string;
 }

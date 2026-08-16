@@ -1,5 +1,6 @@
 import { handleEmbeddingRequest, isEmbeddingPath } from "./api/embedding";
 import { handleMemoryRequest } from "./api/memory";
+import { handleWebRequest, isWebPath } from "./api/web";
 import { RequestAuthError, resolveProjectScope } from "./auth";
 import { corsHeaders, isAuthorized, jsonResponse, textResponse, unauthorizedResponse } from "./api/http";
 import type { Env } from "./env";
@@ -25,7 +26,7 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(env) });
     }
 
-    if (isEmbeddingPath(url.pathname)) {
+    if (isEmbeddingPath(url.pathname) || isWebPath(url.pathname)) {
       const apiToken = getRequiredApiToken(env);
       if (!apiToken) {
         return jsonResponse(env, { error: { message: "API_TOKEN is required" } }, { status: 500 });
@@ -34,7 +35,9 @@ export default {
         return unauthorizedResponse(env, "cf-rag");
       }
 
-      return await handleEmbeddingRequest(request, env);
+      return isWebPath(url.pathname)
+        ? await handleWebRequest(request, env)
+        : await handleEmbeddingRequest(request, env);
     }
 
     if (url.pathname.startsWith("/memory/")) {
