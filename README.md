@@ -144,8 +144,10 @@ npm run deploy
 - `PROFILE_EXTRACTOR_ENDPOINT`（var 或 secret，抽取必填）：OpenAI 兼容接口的 base URL，例如 `https://openrouter.ai/api/v1`
 - `OPENROUTER_API_BASE`（var，可选）：`PROFILE_EXTRACTOR_ENDPOINT` 未设置时的回退 base URL
 - `PROFILE_EXTRACTOR_MODEL`（var，抽取必填）：抽取/校验/对齐使用的模型名
-- `PROFILE_EXTRACTOR_APP_TITLE`（var，可选，默认 `cf-rag`）：作为 `X-Title` 发出。OpenRouter 的
-  Activity 面板按这个字段把用量分到具体 app，共用一个 OpenRouter 账号时用它区分调用方
+- `PROFILE_EXTRACTOR_APP_URL`（var，可选，默认 `https://github.com/Andy963/cf-rag`）：作为 `HTTP-Referer`
+  发出。OpenRouter 用这个 URL 作为 app 的唯一标识，缺了它 Activity 里的 app 一律是 unknown
+- `PROFILE_EXTRACTOR_APP_TITLE`（var，可选，默认 `cf-rag`）：作为 `X-OpenRouter-Title` 发出，只负责
+  给上面那个 URL 起显示名；单独发标题不会建出 app，共用一个 OpenRouter 账号时靠这两个头区分调用方
 - `PROFILE_EXTRACTOR_API_KEY`（secret，抽取必填）：抽取模型的 API key
 - `PROFILE_CONTEXT_MIN_SCORE`（var，可选）：profile 语义召回的最低相似度，默认 `0.55`
 - `PROFILE_BATCH_MAX_CHARS`（var，可选）：evidence 攒批的字符阈值，默认 `10000`
@@ -266,10 +268,11 @@ PROFILE_EXTRACTOR_MODEL
 PERSONAL_MEMORY_OWNER_ID
 ```
 
-Requests carry an `X-Title` header (default `cf-rag`). OpenRouter attributes dashboard activity to
-it, which is what keeps one OpenRouter account shared with other clients readable; other
-OpenAI-compatible gateways ignore it. The companion `HTTP-Referer` header only feeds the public
-leaderboard and is deliberately not sent.
+Requests carry `HTTP-Referer` (default `https://github.com/Andy963/cf-rag`) and
+`X-OpenRouter-Title` (default `cf-rag`). OpenRouter identifies an app by the referer URL and uses
+the title only as that app's display name, so both must be sent or the calls stay attributed to
+`unknown`; other OpenAI-compatible gateways ignore both. This is what keeps one OpenRouter account
+shared with other clients readable.
 
 The extractor must be OpenAI Chat Completions compatible. It runs candidate extraction, independent
 promotion verification, then reconciliation against existing active claims. Reconciliation only

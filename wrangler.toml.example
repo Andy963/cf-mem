@@ -38,8 +38,11 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # PROFILE_EXTRACTOR_MODEL = "your-openrouter-model"
 # PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
 # OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-# OpenRouter app attribution (optional): sent as X-Title, which is what the
-# OpenRouter dashboard groups activity by.
+# OpenRouter app attribution (optional): the URL is sent as HTTP-Referer and is
+# the identity OpenRouter groups activity by; the title is sent as
+# X-OpenRouter-Title and only names that app. A title without a URL stays
+# attributed to "unknown".
+# PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-rag"
 # PROFILE_EXTRACTOR_APP_TITLE = "cf-rag"
 # /memory/* requires a PROJECT_TOKENS_JSON secret such as:
 # {"proj-a":"token-for-a","proj-b":"token-for-b"}

@@ -190,6 +190,7 @@ function parseEvidenceIngestInput(value: unknown): {
 type ExtractorProtocol = "chat_completions" | "responses";
 
 const DEFAULT_EXTRACTOR_APP_TITLE = "cf-rag";
+const DEFAULT_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-rag";
 
 interface ExtractorConfig {
   endpoint: string;
@@ -197,6 +198,7 @@ interface ExtractorConfig {
   model: string;
   protocol: ExtractorProtocol;
   appTitle: string;
+  appUrl: string;
 }
 
 function extractorConfig(env: Env): ExtractorConfig {
@@ -215,9 +217,10 @@ function extractorConfig(env: Env): ExtractorConfig {
     apiKey,
     model,
     protocol,
-    // OpenRouter groups dashboard activity by X-Title, so every request this
-    // Worker makes is attributable without having to read it off the model name.
+    // OpenRouter keys an app on its URL, not on the title, so both headers have
+    // to travel together for dashboard activity to leave the "unknown" bucket.
     appTitle: env.PROFILE_EXTRACTOR_APP_TITLE?.trim() || DEFAULT_EXTRACTOR_APP_TITLE,
+    appUrl: env.PROFILE_EXTRACTOR_APP_URL?.trim() || DEFAULT_EXTRACTOR_APP_URL,
   };
 }
 
@@ -258,10 +261,12 @@ async function callExtractorLlm(
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.apiKey}`,
-        // OpenRouter attributes dashboard activity to this app name; other
-        // OpenAI-compatible gateways ignore it. The companion HTTP-Referer
-        // header only feeds the public leaderboard, so it is not sent.
-        "X-Title": config.appTitle,
+        // HTTP-Referer is the app identity OpenRouter attributes usage to; the
+        // title only renames an app that the referer already created. Sending
+        // the title alone leaves every call in the "unknown" bucket. Other
+        // OpenAI-compatible gateways ignore both.
+        "HTTP-Referer": config.appUrl,
+        "X-OpenRouter-Title": config.appTitle,
       },
       body: JSON.stringify(requestBody),
       signal: controller.signal,
