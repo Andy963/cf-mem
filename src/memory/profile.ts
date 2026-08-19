@@ -189,7 +189,17 @@ function parseEvidenceIngestInput(value: unknown): {
 
 type ExtractorProtocol = "chat_completions" | "responses";
 
-function extractorConfig(env: Env): { endpoint: string; apiKey: string; model: string; protocol: ExtractorProtocol } {
+const DEFAULT_EXTRACTOR_APP_TITLE = "cf-rag";
+
+interface ExtractorConfig {
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  protocol: ExtractorProtocol;
+  appTitle: string;
+}
+
+function extractorConfig(env: Env): ExtractorConfig {
   const protocol = env.PROFILE_EXTRACTOR_PROTOCOL?.trim() || "chat_completions";
   const rawEndpoint = (env.PROFILE_EXTRACTOR_ENDPOINT?.trim() || env.OPENROUTER_API_BASE?.trim() || "").replace(/\/+$/, "");
   const apiKey = env.PROFILE_EXTRACTOR_API_KEY?.trim();
@@ -205,6 +215,9 @@ function extractorConfig(env: Env): { endpoint: string; apiKey: string; model: s
     apiKey,
     model,
     protocol,
+    // OpenRouter groups dashboard activity by X-Title, so every request this
+    // Worker makes is attributable without having to read it off the model name.
+    appTitle: env.PROFILE_EXTRACTOR_APP_TITLE?.trim() || DEFAULT_EXTRACTOR_APP_TITLE,
   };
 }
 
@@ -245,6 +258,10 @@ async function callExtractorLlm(
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.apiKey}`,
+        // OpenRouter attributes dashboard activity to this app name; other
+        // OpenAI-compatible gateways ignore it. The companion HTTP-Referer
+        // header only feeds the public leaderboard, so it is not sent.
+        "X-Title": config.appTitle,
       },
       body: JSON.stringify(requestBody),
       signal: controller.signal,
