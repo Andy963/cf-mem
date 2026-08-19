@@ -27,6 +27,7 @@
 - `POST /memory/context`
 - `GET /memory/claims`
 - `POST /memory/forget`
+- `GET /admin`（Cloudflare Access 保护的只读管理页）
 
 ## 快速开始（部署到你的 Cloudflare 账号）
 
@@ -130,6 +131,21 @@ npm run deploy
 # zone_name = "example.com"
 ```
 
+## Admin dashboard
+
+`/admin` is a read-only usage overview. It shows aggregate active claim, raw segment, storage, and
+per-project usage figures; it does not expose segment text, claim text, API tokens, or write actions.
+
+Protect both `emb.example.com/admin*` and `emb.example.com/admin/api/*` with one Cloudflare Access
+Application. Configure the Access policy to allow the administrator's email, then set the same
+lowercase email as `ADMIN_ALLOWED_EMAIL` in `[vars]`. Access injects
+`Cf-Access-Authenticated-User-Email`; the Worker verifies it against that value before rendering
+the page or returning metrics.
+
+For production, use a custom-domain route and set `workers_dev = false`. Otherwise the same Worker
+may also be available under a `workers.dev` address, which is outside the custom-domain Access
+policy and could allow a forged header to bypass the Worker-level email check.
+
 ## 配置项
 
 - `API_TOKEN`（secret，必填）：embedding 路由的统一鉴权 token
@@ -140,6 +156,7 @@ npm run deploy
 - `RAW_MEMORY_TARGET_BYTES_PER_PROJECT`（var，可选）：触发上限后的清理目标，默认 `83886080`（80 MiB）
 - `RERANK_MODEL`（var，可选）：默认 `@cf/baai/bge-reranker-base`
 - `RERANK_DEFAULT_ENABLED`（var，可选）：默认 `false`；设为 `true` 可让 `/memory/search` 默认启用 rerank
+- `ADMIN_ALLOWED_EMAIL`（var，admin 必填）：允许访问 `/admin` 的 Cloudflare Access 登录邮箱，小写比较
 - `PROFILE_EXTRACTOR_PROTOCOL`（var，可选）：`chat_completions`（默认）或 `responses`
 - `PROFILE_EXTRACTOR_ENDPOINT`（var 或 secret，抽取必填）：OpenAI 兼容接口的 base URL，例如 `https://openrouter.ai/api/v1`
 - `OPENROUTER_API_BASE`（var，可选）：`PROFILE_EXTRACTOR_ENDPOINT` 未设置时的回退 base URL

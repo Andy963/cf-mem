@@ -1,4 +1,5 @@
 import { handleEmbeddingRequest, isEmbeddingPath } from "./api/embedding";
+import { handleAdminRequest } from "./admin";
 import { handleMemoryRequest } from "./api/memory";
 import { handleWebRequest, isWebPath } from "./api/web";
 import { RequestAuthError, resolveProjectScope } from "./auth";
@@ -24,6 +25,10 @@ export default {
 
     if (method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(env) });
+    }
+
+    if (url.pathname === "/admin" || url.pathname === "/admin/" || url.pathname.startsWith("/admin/api/")) {
+      return await handleAdminRequest(request, env);
     }
 
     if (isEmbeddingPath(url.pathname) || isWebPath(url.pathname)) {

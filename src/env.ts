@@ -51,6 +51,7 @@ export interface Env {
   PROFILE_BATCH_MAX_SEGMENTS?: string;
   PROFILE_BATCH_IDLE_MS?: string;
   CORS_ALLOW_ORIGIN?: string;
+  ADMIN_ALLOWED_EMAIL?: string;
 
   EMBEDDING_MODEL?: string;
   RERANK_MODEL?: string;

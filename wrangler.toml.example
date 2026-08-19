@@ -28,6 +28,10 @@ index_name = "cf-claims"
 
 [vars]
 CORS_ALLOW_ORIGIN = "*"
+# The /admin dashboard requires Cloudflare Access plus this allowed email.
+# Set workers_dev = false in production so the dashboard cannot bypass Access
+# through the worker's workers.dev address.
+# ADMIN_ALLOWED_EMAIL = "you@example.com"
 EMBEDDING_MODEL = "@cf/baai/bge-m3"
 RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # Optional: set to true to enable rerank by default for /memory/search.
