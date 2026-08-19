@@ -165,7 +165,7 @@ policy and could allow a forged header to bypass the Worker-level email check.
 - `PROFILE_EXTRACTOR_ENDPOINT`（var 或 secret，抽取必填）：OpenAI 兼容接口的 base URL，例如 `https://openrouter.ai/api/v1`
 - `OPENROUTER_API_BASE`（var，可选）：`PROFILE_EXTRACTOR_ENDPOINT` 未设置时的回退 base URL
 - `PROFILE_EXTRACTOR_MODEL`（var，抽取必填）：抽取/校验/对齐使用的模型名
-- `PROFILE_EXTRACTOR_APP_URL`（var，可选，默认 `https://github.com/Andy963/cf-rag`）：作为 `HTTP-Referer`
+- `PROFILE_EXTRACTOR_APP_URL`（var，可选，默认 `https://github.com/your-org/cf-rag`）：作为 `HTTP-Referer`
   发出。OpenRouter 用这个 URL 作为 app 的唯一标识，缺了它 Activity 里的 app 一律是 unknown
 - `PROFILE_EXTRACTOR_APP_TITLE`（var，可选，默认 `cf-rag`）：作为 `X-OpenRouter-Title` 发出，只负责
   给上面那个 URL 起显示名；单独发标题不会建出 app，共用一个 OpenRouter 账号时靠这两个头区分调用方
@@ -289,7 +289,7 @@ PROFILE_EXTRACTOR_MODEL
 PERSONAL_MEMORY_OWNER_ID
 ```
 
-Requests carry `HTTP-Referer` (default `https://github.com/Andy963/cf-rag`) and
+Requests carry `HTTP-Referer` (default `https://github.com/your-org/cf-rag`) and
 `X-OpenRouter-Title` (default `cf-rag`). OpenRouter identifies an app by the referer URL and uses
 the title only as that app's display name, so both must be sent or the calls stay attributed to
 `unknown`; other OpenAI-compatible gateways ignore both. This is what keeps one OpenRouter account

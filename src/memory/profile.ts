@@ -190,7 +190,7 @@ function parseEvidenceIngestInput(value: unknown): {
 type ExtractorProtocol = "chat_completions" | "responses";
 
 const DEFAULT_EXTRACTOR_APP_TITLE = "cf-rag";
-const DEFAULT_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-rag";
+const DEFAULT_EXTRACTOR_APP_URL = "https://github.com/your-org/cf-rag";
 
 interface ExtractorConfig {
   endpoint: string;
