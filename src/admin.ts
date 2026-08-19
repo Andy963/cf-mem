@@ -1,5 +1,7 @@
 import type { Env } from "./env";
-import { jsonResponse, textResponse } from "./api/http";
+import type { StoredClaimRow } from "./db/d1";
+import { jsonResponse, parseJson, textResponse } from "./api/http";
+import { syncClaimVector } from "./memory/claim-index";
 
 interface OverviewRow {
   claims_total: number;
@@ -40,6 +42,8 @@ interface AdminClaimRow {
   workspace_id: string | null;
   created_at: number;
   updated_at: number;
+  sources: string;
+  tags: string;
 }
 
 interface ClaimEvidenceRow {
@@ -49,6 +53,14 @@ interface ClaimEvidenceRow {
   text: string | null;
   metadata_json: string | null;
   deletion_state: string | null;
+  source_app: string | null;
+}
+
+interface ClaimAuditRow {
+  action: string;
+  actor_email: string;
+  reason: string | null;
+  created_at: number;
 }
 
 interface ClaimListFilters {
@@ -78,6 +90,134 @@ function adminAccessError(request: Request, env: Env): Response | null {
     return jsonResponse(env, { error: { message: "Forbidden" } }, { status: 403 });
   }
   return null;
+}
+
+function adminActorEmail(request: Request): string {
+  return request.headers.get("Cf-Access-Authenticated-User-Email")!.trim().toLowerCase();
+}
+
+function requireSameOrigin(request: Request): void {
+  const origin = request.headers.get("Origin");
+  if (!origin || origin !== new URL(request.url).origin) throw new Error("Cross-origin admin writes are not allowed");
+}
+
+function optionalReason(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value.trim().length > 1_000) throw new Error("reason must be at most 1000 characters");
+  return value.trim() || null;
+}
+
+function claimAuditSnapshot(claim: StoredClaimRow): Record<string, unknown> {
+  return {
+    canonical_text: claim.canonical_text,
+    value_json: claim.value_json,
+    status: claim.status,
+    valid_until: claim.valid_until,
+    updated_at: claim.updated_at,
+  };
+}
+
+async function appendClaimAudit(
+  env: Env,
+  claim: Pick<StoredClaimRow, "id" | "project_id">,
+  request: Request,
+  action: "edit" | "retract" | "tag_add" | "tag_remove",
+  reason: string | null,
+  before: unknown,
+  after: unknown,
+): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO memory_claim_audit_log (id, project_id, claim_id, action, actor_email, reason, before_json, after_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).bind(
+    `claim_audit_${crypto.randomUUID()}`,
+    claim.project_id,
+    claim.id,
+    action,
+    adminActorEmail(request),
+    reason,
+    JSON.stringify(before),
+    JSON.stringify(after),
+    Date.now(),
+  ).run();
+}
+
+async function syncAdminClaimVector(env: Env, claim: StoredClaimRow): Promise<void> {
+  try {
+    await syncClaimVector(env, claim);
+  } catch (error) {
+    // The D1 mutation and audit log are authoritative. Claim searches validate
+    // status in D1 after Vectorize retrieval, so an unavailable vector binding
+    // must not turn a completed admin operation into a misleading failure.
+    console.error(`[admin] vector sync deferred for ${claim.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+async function requireAdminClaim(env: Env, claimId: string): Promise<StoredClaimRow> {
+  const claim = await env.DB.prepare(
+    `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, created_at, updated_at
+     FROM memory_claims WHERE id = ?`,
+  ).bind(claimId).first<StoredClaimRow>();
+  if (!claim) throw new Error("Claim not found");
+  return claim;
+}
+
+async function updateAdminClaim(env: Env, request: Request, claimId: string, body: unknown): Promise<void> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Request body must be an object");
+  const input = body as Record<string, unknown>;
+  const canonicalText = input.canonical_text;
+  if (typeof canonicalText !== "string" || !canonicalText.trim() || canonicalText.trim().length > 4_000) {
+    throw new Error("canonical_text must be 1 to 4000 characters");
+  }
+  if (input.value === undefined) throw new Error("value is required");
+  let valueJson: string;
+  try {
+    valueJson = JSON.stringify(input.value);
+    if (valueJson === undefined) throw new Error();
+    JSON.parse(valueJson);
+  } catch {
+    throw new Error("value must be JSON-serializable");
+  }
+  const reason = optionalReason(input.reason);
+  const claim = await requireAdminClaim(env, claimId);
+  const before = claimAuditSnapshot(claim);
+  const now = Date.now();
+  await env.DB.prepare("UPDATE memory_claims SET canonical_text = ?, value_json = ?, updated_at = ? WHERE id = ? AND project_id = ?")
+    .bind(canonicalText.trim(), valueJson, now, claim.id, claim.project_id).run();
+  const updated = await requireAdminClaim(env, claimId);
+  await appendClaimAudit(env, updated, request, "edit", reason, before, claimAuditSnapshot(updated));
+  await syncAdminClaimVector(env, updated);
+}
+
+async function retractAdminClaim(env: Env, request: Request, claimId: string, body: unknown): Promise<void> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Request body must be an object");
+  const reason = optionalReason((body as Record<string, unknown>).reason);
+  const claim = await requireAdminClaim(env, claimId);
+  if (claim.status === "retracted") throw new Error("Claim is already retracted");
+  const before = claimAuditSnapshot(claim);
+  const now = Date.now();
+  await env.DB.prepare("UPDATE memory_claims SET status = 'retracted', valid_until = COALESCE(valid_until, ?), updated_at = ? WHERE id = ? AND project_id = ?")
+    .bind(now, now, claim.id, claim.project_id).run();
+  const updated = await requireAdminClaim(env, claimId);
+  await appendClaimAudit(env, updated, request, "retract", reason, before, claimAuditSnapshot(updated));
+  await syncAdminClaimVector(env, updated);
+}
+
+async function mutateAdminTag(env: Env, request: Request, claimId: string, tag: string, add: boolean, body: unknown): Promise<void> {
+  if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(tag)) throw new Error("tag must use lowercase letters, numbers, hyphens, or underscores");
+  const reason = body && typeof body === "object" && !Array.isArray(body) ? optionalReason((body as Record<string, unknown>).reason) : null;
+  const claim = await requireAdminClaim(env, claimId);
+  const existing = await env.DB.prepare("SELECT tag FROM memory_claim_tags WHERE project_id = ? AND claim_id = ? AND tag = ?")
+    .bind(claim.project_id, claim.id, tag).first<{ tag: string }>();
+  if (add && !existing) {
+    await env.DB.prepare("INSERT INTO memory_claim_tags (project_id, claim_id, tag, created_at) VALUES (?, ?, ?, ?)")
+      .bind(claim.project_id, claim.id, tag, Date.now()).run();
+    await appendClaimAudit(env, claim, request, "tag_add", reason, null, { tag });
+  }
+  if (!add && existing) {
+    await env.DB.prepare("DELETE FROM memory_claim_tags WHERE project_id = ? AND claim_id = ? AND tag = ?")
+      .bind(claim.project_id, claim.id, tag).run();
+    await appendClaimAudit(env, claim, request, "tag_remove", reason, { tag }, null);
+  }
 }
 
 async function getOverview(env: Env): Promise<{ summary: OverviewRow; projects: ProjectRow[] }> {
@@ -190,7 +330,9 @@ async function listAdminClaims(env: Env, filters: ClaimListFilters): Promise<{ p
   const [count, claims] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM memory_claims WHERE ${where}`).bind(...bindings).first<{ total: number }>(),
     env.DB.prepare(
-      `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, created_at, updated_at
+      `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, created_at, updated_at,
+       COALESCE((SELECT GROUP_CONCAT(DISTINCT json_extract(s.metadata_json, '$.source_app')) FROM memory_evidence AS e JOIN memory_segments AS s ON s.id = e.segment_id AND s.project_id = e.project_id WHERE e.claim_id = memory_claims.id AND json_extract(s.metadata_json, '$.source_app') IS NOT NULL), '') AS sources,
+       COALESCE((SELECT GROUP_CONCAT(tag) FROM memory_claim_tags WHERE claim_id = memory_claims.id), '') AS tags
        FROM memory_claims
        WHERE ${where}
        ORDER BY updated_at DESC
@@ -200,21 +342,27 @@ async function listAdminClaims(env: Env, filters: ClaimListFilters): Promise<{ p
   return { page: filters.page, page_size: CLAIM_PAGE_SIZE, total: count?.total ?? 0, claims: claims.results };
 }
 
-async function getAdminClaimDetail(env: Env, claimId: string): Promise<{ claim: AdminClaimRow; evidence: ClaimEvidenceRow[] } | null> {
+async function getAdminClaimDetail(env: Env, claimId: string): Promise<{ claim: AdminClaimRow; evidence: ClaimEvidenceRow[]; tags: string[]; audit: ClaimAuditRow[] } | null> {
   const claim = await env.DB.prepare(
-    `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, created_at, updated_at
+    `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, created_at, updated_at,
+     COALESCE((SELECT GROUP_CONCAT(DISTINCT json_extract(s.metadata_json, '$.source_app')) FROM memory_evidence AS e JOIN memory_segments AS s ON s.id = e.segment_id AND s.project_id = e.project_id WHERE e.claim_id = memory_claims.id AND json_extract(s.metadata_json, '$.source_app') IS NOT NULL), '') AS sources,
+     COALESCE((SELECT GROUP_CONCAT(tag) FROM memory_claim_tags WHERE claim_id = memory_claims.id), '') AS tags
      FROM memory_claims WHERE id = ?`,
   ).bind(claimId).first<AdminClaimRow>();
   if (!claim) return null;
 
-  const evidence = await env.DB.prepare(
-    `SELECT e.segment_id, e.relation, e.created_at, s.text, s.metadata_json, s.deletion_state
+  const [evidence, tags, audit] = await Promise.all([
+    env.DB.prepare(
+    `SELECT e.segment_id, e.relation, e.created_at, s.text, s.metadata_json, s.deletion_state, json_extract(s.metadata_json, '$.source_app') AS source_app
      FROM memory_evidence AS e
      LEFT JOIN memory_segments AS s ON s.id = e.segment_id AND s.project_id = e.project_id
      WHERE e.claim_id = ? AND e.project_id = ?
      ORDER BY e.created_at DESC`,
-  ).bind(claimId, claim.project_id).all<ClaimEvidenceRow>();
-  return { claim, evidence: evidence.results };
+    ).bind(claimId, claim.project_id).all<ClaimEvidenceRow>(),
+    env.DB.prepare("SELECT tag FROM memory_claim_tags WHERE project_id = ? AND claim_id = ? ORDER BY tag ASC").bind(claim.project_id, claimId).all<{ tag: string }>(),
+    env.DB.prepare("SELECT action, actor_email, reason, created_at FROM memory_claim_audit_log WHERE project_id = ? AND claim_id = ? ORDER BY created_at DESC LIMIT 50").bind(claim.project_id, claimId).all<ClaimAuditRow>(),
+  ]);
+  return { claim, evidence: evidence.results, tags: tags.results.map((row) => row.tag), audit: audit.results };
 }
 
 function dashboardResponse(): Response {
@@ -253,6 +401,38 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       const message = error instanceof Error ? error.message : "Unable to load claims";
       const status = ["page must be a positive integer", "project_id is too long", "q is too long", "status is invalid", "type is invalid"].includes(message) ? 400 : 502;
       if (status === 502) console.error(`[admin] claims failed: ${message}`);
+      return jsonResponse(env, { error: { message } }, { status });
+    }
+  }
+  const detailMatch = url.pathname.match(/^\/admin\/api\/claims\/([^/]+)(?:\/(retract|tags)(?:\/([^/]+))?)?$/);
+  if (detailMatch && method !== "GET") {
+    let claimId: string;
+    try {
+      claimId = decodeURIComponent(detailMatch[1]);
+    } catch {
+      return jsonResponse(env, { error: { message: "Invalid claim id" } }, { status: 400 });
+    }
+    if (!claimId) return jsonResponse(env, { error: { message: "Invalid claim id" } }, { status: 400 });
+    try {
+      requireSameOrigin(request);
+      const body = await parseJson(request);
+      if (method === "PUT" && !detailMatch[2]) await updateAdminClaim(env, request, claimId, body);
+      else if (method === "POST" && detailMatch[2] === "retract") await retractAdminClaim(env, request, claimId, body);
+      else if (method === "POST" && detailMatch[2] === "tags") {
+        const tag = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).tag : null;
+        if (typeof tag !== "string") {
+          throw new Error("tag is required");
+        }
+        await mutateAdminTag(env, request, claimId, tag, true, body);
+      } else if (method === "DELETE" && detailMatch[2] === "tags" && detailMatch[3]) {
+        await mutateAdminTag(env, request, claimId, decodeURIComponent(detailMatch[3]), false, body);
+      } else return textResponse(env, "Method Not Allowed", { status: 405 });
+      const detail = await getAdminClaimDetail(env, claimId);
+      return detail ? jsonResponse(env, { ok: true, ...detail }) : jsonResponse(env, { error: { message: "Claim not found" } }, { status: 404 });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to update claim";
+      const status = message === "Claim not found" ? 404 : 400;
+      if (status === 400) console.warn(`[admin] claim update rejected: ${message}`);
       return jsonResponse(env, { error: { message } }, { status });
     }
   }
@@ -319,6 +499,9 @@ const DASHBOARD_HTML = `<!doctype html>
     .badge.active { color: #a8ead7; border-color: #327562; background: #123b34; }
     .badge.retracted { color: #ffb5b5; border-color: #7b4646; background: #3a2227; }
     .badge.superseded { color: #d3bdff; border-color: #604e83; background: #2b253d; }
+    .tag { display: inline-block; margin: 2px 4px 2px 0; padding: 3px 7px; color: #b9cef9; border-radius: 999px; background: #243251; font-size: 12px; }
+    .source { display: inline-block; margin: 5px 4px 0 0; color: #91d8ca; font-size: 12px; font-weight: 650; }
+    .danger { color: #ffd4d4; border-color: #8c4c4c; background: #54282d; } .danger:hover { background: #70333a; }
     .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 20px; border-top: 1px solid #293746; color: #9fb0c2; font-size: 13px; }
     .pager div { display: flex; gap: 8px; }
     button:disabled { cursor: not-allowed; opacity: .45; }
@@ -326,6 +509,7 @@ const DASHBOARD_HTML = `<!doctype html>
     dialog::backdrop { background: rgba(4, 9, 14, .72); backdrop-filter: blur(3px); }
     .dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid #293746; }
     .dialog-head h2 { margin: 0; font-size: 20px; }
+    .dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
     .detail-grid { display: grid; grid-template-columns: 150px 1fr; gap: 10px 16px; margin: 20px 0; font-size: 14px; }
     .detail-grid dt { color: #9fb0c2; } .detail-grid dd { margin: 0; overflow-wrap: anywhere; }
     .detail-content { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border: 1px solid #293746; border-radius: 9px; background: #101720; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -368,12 +552,12 @@ const DASHBOARD_HTML = `<!doctype html>
     </section>
   </main>
   <dialog id="claim-dialog">
-    <div class="dialog-head"><h2>Claim detail</h2><button type="button" id="close-dialog">Close</button></div>
+    <div class="dialog-head"><h2>Claim detail</h2><div class="dialog-actions"><button type="button" id="edit-claim">Edit</button><button type="button" id="add-tag">Add tag</button><button type="button" class="danger" id="retract-claim">Retract</button><button type="button" id="close-dialog">Close</button></div></div>
     <div id="claim-detail"></div>
   </dialog>
   <script>
     const formatNumber = new Intl.NumberFormat();
-    const claimState = { page: 1, total: 0, pageSize: 25 };
+    const claimState = { page: 1, total: 0, pageSize: 25, currentClaim: null };
     function formatBytes(bytes) {
       if (!bytes) return "0 B";
       const units = ["B", "KB", "MB", "GB", "TB"];
@@ -386,6 +570,8 @@ const DASHBOARD_HTML = `<!doctype html>
     function setText(id, value) { document.getElementById(id).textContent = value; }
     function createCell(value) { const cell = document.createElement("td"); cell.textContent = value; return cell; }
     function badge(value) { const element = document.createElement("span"); element.className = "badge " + value; element.textContent = value; return element; }
+    function splitLabels(value) { return value ? value.split(",").filter(Boolean) : []; }
+    function labels(values, className) { const fragment = document.createDocumentFragment(); for (const value of values) { const label = document.createElement("span"); label.className = className; label.textContent = value; fragment.append(label); } return fragment; }
     function showError(message) {
       const error = document.getElementById("error"); error.textContent = message; error.style.display = "block";
     }
@@ -453,8 +639,8 @@ const DASHBOARD_HTML = `<!doctype html>
           button.type = "button"; button.className = "claim-button"; button.addEventListener("click", () => openClaim(claim.id));
           const text = document.createElement("div"); text.className = "claim-text"; text.textContent = claim.canonical_text;
           const meta = document.createElement("div"); meta.className = "claim-meta"; meta.textContent = claim.subject + " · " + claim.memory_key;
-          button.append(text, meta); claimCell.append(button); row.append(claimCell);
-          row.append(createCell(claim.type + " · " + claim.scope_kind));
+          button.append(text, meta, labels(splitLabels(claim.tags), "tag")); claimCell.append(button); row.append(claimCell);
+          const typeCell = createCell(claim.type + " · " + claim.scope_kind); typeCell.append(document.createElement("br"), labels(splitLabels(claim.sources), "source")); row.append(typeCell);
           const statusCell = document.createElement("td"); statusCell.append(badge(claim.status)); row.append(statusCell);
           row.append(createCell((claim.confidence * 100).toFixed(0) + "%"));
           row.append(createCell(formatDate(claim.updated_at)));
@@ -473,11 +659,11 @@ const DASHBOARD_HTML = `<!doctype html>
     async function openClaim(id) {
       const dialog = document.getElementById("claim-dialog");
       const detail = document.getElementById("claim-detail");
-      detail.textContent = "Loading…"; dialog.showModal();
+      detail.textContent = "Loading…"; if (!dialog.open) dialog.showModal();
       try {
         const response = await fetch("/admin/api/claims/" + encodeURIComponent(id), { credentials: "same-origin", cache: "no-store" });
         if (!response.ok) throw new Error("The claim detail could not be loaded.");
-        const data = await response.json(); const claim = data.claim;
+        const data = await response.json(); const claim = data.claim; claimState.currentClaim = claim;
         let value = claim.value_json;
         try { value = JSON.stringify(JSON.parse(value), null, 2); } catch {}
         detail.replaceChildren();
@@ -489,6 +675,16 @@ const DASHBOARD_HTML = `<!doctype html>
         }
         const canonical = document.createElement("div"); canonical.className = "detail-content"; canonical.textContent = claim.canonical_text;
         const structured = document.createElement("div"); structured.className = "detail-content"; structured.textContent = value;
+        const sourcesTitle = document.createElement("h3"); sourcesTitle.textContent = "Sources";
+        const sources = document.createElement("div"); sources.append(labels(splitLabels(claim.sources), "source"));
+        if (!claim.sources) sources.textContent = "No channel metadata on linked evidence.";
+        const tagsTitle = document.createElement("h3"); tagsTitle.textContent = "Tags";
+        const tags = document.createElement("div");
+        if (!data.tags.length) tags.className = "hint", tags.textContent = "No tags. Use Add tag to organize this claim.";
+        for (const tag of data.tags) {
+          const button = document.createElement("button"); button.type = "button"; button.className = "tag"; button.textContent = tag + " ×";
+          button.addEventListener("click", () => removeTag(tag)); tags.append(button);
+        }
         const canonicalTitle = document.createElement("h3"); canonicalTitle.textContent = "Canonical text";
         const structuredTitle = document.createElement("h3"); structuredTitle.textContent = "Structured value";
         const evidence = document.createElement("section"); evidence.className = "evidence";
@@ -502,7 +698,18 @@ const DASHBOARD_HTML = `<!doctype html>
           const content = document.createElement("p"); content.textContent = item.text || (item.deletion_state === "pending_delete" ? "This evidence segment is pending deletion." : "This evidence segment is no longer available.");
           card.append(heading, content); evidence.append(card);
         }
-        detail.append(metadata, canonicalTitle, canonical, structuredTitle, structured, evidence);
+        const audit = document.createElement("section"); audit.className = "evidence";
+        const auditTitle = document.createElement("h3"); auditTitle.textContent = "Change history (" + data.audit.length + ")"; audit.append(auditTitle);
+        if (!data.audit.length) {
+          const empty = document.createElement("p"); empty.className = "hint"; empty.textContent = "No administrator changes have been recorded."; audit.append(empty);
+        }
+        for (const item of data.audit) {
+          const row = document.createElement("article"); row.className = "evidence-item";
+          const heading = document.createElement("strong"); heading.textContent = item.action + " · " + formatDate(item.created_at);
+          const content = document.createElement("p"); content.textContent = item.reason || "No reason provided.";
+          row.append(heading, content); audit.append(row);
+        }
+        detail.append(metadata, sourcesTitle, sources, tagsTitle, tags, canonicalTitle, canonical, structuredTitle, structured, evidence, audit);
       } catch (cause) {
         detail.textContent = cause instanceof Error ? cause.message : "The claim detail could not be loaded.";
       }
@@ -511,6 +718,41 @@ const DASHBOARD_HTML = `<!doctype html>
       document.getElementById("error").style.display = "none";
       await loadOverview(); await loadClaims();
     }
+    async function adminMutation(path, method, payload) {
+      const response = await fetch(path, { method, credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || "Claim update failed.");
+      await refresh();
+      if (claimState.currentClaim) await openClaim(claimState.currentClaim.id);
+    }
+    async function removeTag(tag) {
+      if (!claimState.currentClaim || !confirm("Remove tag “" + tag + "”?")) return;
+      try {
+        await adminMutation("/admin/api/claims/" + encodeURIComponent(claimState.currentClaim.id) + "/tags/" + encodeURIComponent(tag), "DELETE", { reason: prompt("Reason for removing this tag (optional):") || null });
+      } catch (cause) { showError(cause instanceof Error ? cause.message : "Tag removal failed."); }
+    }
+    document.getElementById("edit-claim").addEventListener("click", async () => {
+      const claim = claimState.currentClaim; if (!claim) return;
+      const canonicalText = prompt("Claim text:", claim.canonical_text); if (canonicalText === null) return;
+      const rawValue = prompt("Structured JSON value:", claim.value_json); if (rawValue === null) return;
+      try {
+        await adminMutation("/admin/api/claims/" + encodeURIComponent(claim.id), "PUT", { canonical_text: canonicalText, value: JSON.parse(rawValue), reason: prompt("Reason for this edit (optional):") || null });
+      } catch (cause) { showError(cause instanceof Error ? cause.message : "Claim edit failed."); }
+    });
+    document.getElementById("retract-claim").addEventListener("click", async () => {
+      const claim = claimState.currentClaim; if (!claim || !confirm("Retract this claim? It will stop being used for retrieval.")) return;
+      try {
+        await adminMutation("/admin/api/claims/" + encodeURIComponent(claim.id) + "/retract", "POST", { reason: prompt("Reason for retraction (optional):") || null });
+        document.getElementById("claim-dialog").close();
+      } catch (cause) { showError(cause instanceof Error ? cause.message : "Claim retraction failed."); }
+    });
+    document.getElementById("add-tag").addEventListener("click", async () => {
+      const claim = claimState.currentClaim; const tag = prompt("Tag (lowercase letters, numbers, - or _):");
+      if (!claim || tag === null) return;
+      try {
+        await adminMutation("/admin/api/claims/" + encodeURIComponent(claim.id) + "/tags", "POST", { tag, reason: prompt("Reason for adding this tag (optional):") || null });
+      } catch (cause) { showError(cause instanceof Error ? cause.message : "Adding tag failed."); }
+    });
     document.getElementById("claim-filters").addEventListener("submit", (event) => { event.preventDefault(); claimState.page = 1; loadClaims(); });
     document.getElementById("previous-page").addEventListener("click", () => { if (claimState.page > 1) { claimState.page--; loadClaims(); } });
     document.getElementById("next-page").addEventListener("click", () => { if (claimState.page * claimState.pageSize < claimState.total) { claimState.page++; loadClaims(); } });
