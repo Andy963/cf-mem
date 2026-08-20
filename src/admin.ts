@@ -2,6 +2,13 @@ import type { Env } from "./env";
 import type { StoredClaimRow } from "./db/d1";
 import { jsonResponse, parseJson, textResponse } from "./api/http";
 import { syncClaimVector } from "./memory/claim-index";
+import {
+  DEFAULT_EXTRACTOR_INSTRUCTIONS,
+  DEFAULT_VERIFIER_INSTRUCTIONS,
+  loadPromptConfig,
+  savePromptConfig,
+  runExtractionTest,
+} from "./memory/profile";
 
 interface OverviewRow {
   claims_total: number;
@@ -451,6 +458,56 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       return jsonResponse(env, { error: { message: "Unable to load claim" } }, { status: 502 });
     }
   }
+  if (method === "GET" && url.pathname === "/admin/api/prompts") {
+    try {
+      const config = await loadPromptConfig(env);
+      return jsonResponse(env, {
+        ok: true,
+        extractor_instructions: config.extractorInstructions,
+        verifier_instructions: config.verifierInstructions,
+        is_custom: config.isCustom,
+        default_extractor_instructions: DEFAULT_EXTRACTOR_INSTRUCTIONS,
+        default_verifier_instructions: DEFAULT_VERIFIER_INSTRUCTIONS,
+      }, { headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
+      console.error(`[admin] prompts load failed: ${error instanceof Error ? error.message : String(error)}`);
+      return jsonResponse(env, { error: { message: "Unable to load prompt configuration" } }, { status: 502 });
+    }
+  }
+  if (method === "PUT" && url.pathname === "/admin/api/prompts") {
+    try {
+      requireSameOrigin(request);
+      const body = await parseJson(request) as Record<string, unknown>;
+      const extractor = typeof body.extractor_instructions === "string" ? body.extractor_instructions.trim() : "";
+      const verifier = typeof body.verifier_instructions === "string" ? body.verifier_instructions.trim() : "";
+      if (!extractor) throw new Error("extractor_instructions must not be empty");
+      if (!verifier) throw new Error("verifier_instructions must not be empty");
+      if (extractor.length > 20_000) throw new Error("extractor_instructions is too long (max 20000 characters)");
+      if (verifier.length > 20_000) throw new Error("verifier_instructions is too long (max 20000 characters)");
+      await savePromptConfig(env, extractor, verifier, adminActorEmail(request));
+      return jsonResponse(env, { ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to save prompt configuration";
+      return jsonResponse(env, { error: { message } }, { status: 400 });
+    }
+  }
+  if (method === "POST" && url.pathname === "/admin/api/prompts/test") {
+    try {
+      requireSameOrigin(request);
+      const body = await parseJson(request) as Record<string, unknown>;
+      const evidenceText = typeof body.evidence_text === "string" ? body.evidence_text.trim() : "";
+      if (!evidenceText) throw new Error("evidence_text must not be empty");
+      if (evidenceText.length > 8_000) throw new Error("evidence_text is too long (max 8000 characters)");
+      const customExtractor = typeof body.extractor_instructions === "string" ? body.extractor_instructions : undefined;
+      const customVerifier = typeof body.verifier_instructions === "string" ? body.verifier_instructions : undefined;
+      const result = await runExtractionTest(env, evidenceText, customExtractor, customVerifier);
+      return jsonResponse(env, { ok: true, ...result }, { headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Extraction test failed";
+      console.error(`[admin] extraction test failed: ${message}`);
+      return jsonResponse(env, { error: { message } }, { status: 502 });
+    }
+  }
   if (method !== "GET") return textResponse(env, "Method Not Allowed", { status: 405 });
   return textResponse(env, "Not Found", { status: 404 });
 }
@@ -519,6 +576,24 @@ const DASHBOARD_HTML = `<!doctype html>
     #error { display: none; margin: 0 0 24px; padding: 14px 16px; color: #ffd9d9; border: 1px solid #814747; border-radius: 10px; background: #371e24; }
     @media (max-width: 780px) { main { width: min(100% - 24px, 1120px); padding-top: 32px; } header { margin-bottom: 28px; } .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .filters { grid-template-columns: 1fr 1fr; } .filters input { grid-column: 1 / -1; } }
     @media (max-width: 440px) { header { display: block; } header button { margin-top: 20px; } .grid { grid-template-columns: 1fr; } }
+    .prompt-body { padding: 20px; }
+    .prompt-field { margin-bottom: 20px; }
+    .prompt-field label { display: block; color: #9fb0c2; font-size: 13px; font-weight: 650; margin-bottom: 6px; }
+    textarea { width: 100%; color: #edf3fa; border: 1px solid #426471; border-radius: 8px; background: #161f2a; padding: 10px 12px; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; resize: vertical; }
+    textarea:focus { outline: 3px solid #6ed2bc; outline-offset: 2px; border-color: #6ed2bc; }
+    .prompt-actions { display: flex; gap: 10px; margin-bottom: 28px; }
+    .prompt-test { border-top: 1px solid #293746; padding-top: 20px; }
+    .prompt-test h3 { font-size: 15px; margin: 0 0 12px; }
+    .prompt-test label { display: block; color: #9fb0c2; font-size: 13px; font-weight: 650; margin-bottom: 6px; }
+    .prompt-test button { margin-top: 10px; }
+    #test-results { margin-top: 20px; }
+    .test-candidate { margin-bottom: 16px; padding: 14px; border: 1px solid #293746; border-radius: 9px; background: #101720; }
+    .test-candidate h4 { margin: 0 0 8px; font-size: 14px; }
+    .test-verdict { margin-top: 8px; font-weight: 650; }
+    .test-verdict.accept { color: #a8ead7; }
+    .test-verdict.reject { color: #ffb5b5; }
+    .test-verdict.hold { color: #ffd9a0; }
+    .test-raw { margin-top: 12px; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border: 1px solid #293746; border-radius: 8px; background: #0d141c; font: 12px/1.5 ui-monospace, monospace; color: #718397; max-height: 300px; overflow-y: auto; }
   </style>
 </head>
 <body>
@@ -549,6 +624,30 @@ const DASHBOARD_HTML = `<!doctype html>
       </form>
       <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Type / scope</th><th>Status</th><th>Confidence</th><th>Updated</th></tr></thead><tbody id="claim-rows"></tbody></table></div>
       <div class="pager"><span id="page-label">—</span><div><button type="button" id="previous-page">Previous</button><button type="button" id="next-page">Next</button></div></div>
+    </section>
+    <section class="table-card" id="prompt-section" aria-labelledby="prompt-title">
+      <div class="section-heading"><h2 id="prompt-title">Extractor prompts</h2><span class="hint" id="prompt-status">Loading…</span></div>
+      <div class="prompt-body">
+        <div class="prompt-field">
+          <label for="extractor-prompt">Extractor instructions</label>
+          <textarea id="extractor-prompt" rows="12" spellcheck="false" placeholder="Loading…"></textarea>
+        </div>
+        <div class="prompt-field">
+          <label for="verifier-prompt">Verifier instructions</label>
+          <textarea id="verifier-prompt" rows="10" spellcheck="false" placeholder="Loading…"></textarea>
+        </div>
+        <div class="prompt-actions">
+          <button type="button" id="save-prompts">Save prompts</button>
+          <button type="button" id="reset-prompts">Reset to defaults</button>
+        </div>
+        <div class="prompt-test">
+          <h3>Test extraction</h3>
+          <label for="test-evidence">Evidence text (user speech)</label>
+          <textarea id="test-evidence" rows="4" spellcheck="false" placeholder="e.g. 版本号明明是三位数字 你非要加个pre.0上去"></textarea>
+          <button type="button" id="run-test">Run test</button>
+          <div id="test-results"></div>
+        </div>
+      </div>
     </section>
   </main>
   <dialog id="claim-dialog">
@@ -758,6 +857,100 @@ const DASHBOARD_HTML = `<!doctype html>
     document.getElementById("next-page").addEventListener("click", () => { if (claimState.page * claimState.pageSize < claimState.total) { claimState.page++; loadClaims(); } });
     document.getElementById("close-dialog").addEventListener("click", () => document.getElementById("claim-dialog").close());
     document.getElementById("refresh").addEventListener("click", refresh);
+
+    // ── Extractor prompt editor ──
+    let promptDefaults = { extractor: "", verifier: "" };
+    async function loadPrompts() {
+      try {
+        const res = await fetch("/admin/api/prompts", { credentials: "same-origin", cache: "no-store" });
+        if (!res.ok) throw new Error("Could not load prompt configuration.");
+        const data = await res.json();
+        document.getElementById("extractor-prompt").value = data.extractor_instructions;
+        document.getElementById("verifier-prompt").value = data.verifier_instructions;
+        promptDefaults = { extractor: data.default_extractor_instructions, verifier: data.default_verifier_instructions };
+        document.getElementById("prompt-status").textContent = data.is_custom ? "Custom prompts (saved)" : "Default prompts";
+      } catch (cause) {
+        document.getElementById("prompt-status").textContent = "Error loading prompts";
+      }
+    }
+    document.getElementById("save-prompts").addEventListener("click", async () => {
+      const extractor = document.getElementById("extractor-prompt").value.trim();
+      const verifier = document.getElementById("verifier-prompt").value.trim();
+      if (!extractor || !verifier) { alert("Both prompts must not be empty."); return; }
+      try {
+        const res = await fetch("/admin/api/prompts", {
+          method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ extractor_instructions: extractor, verifier_instructions: verifier }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error?.message || "Save failed.");
+        document.getElementById("prompt-status").textContent = "Custom prompts (saved)";
+      } catch (cause) { alert(cause instanceof Error ? cause.message : "Save failed."); }
+    });
+    document.getElementById("reset-prompts").addEventListener("click", () => {
+      if (!confirm("Reset both prompts to compiled defaults? Unsaved changes will be lost.")) return;
+      document.getElementById("extractor-prompt").value = promptDefaults.extractor;
+      document.getElementById("verifier-prompt").value = promptDefaults.verifier;
+      document.getElementById("prompt-status").textContent = "Default prompts (unsaved)";
+    });
+    document.getElementById("run-test").addEventListener("click", async () => {
+      const evidence = document.getElementById("test-evidence").value.trim();
+      if (!evidence) { alert("Enter some evidence text to test."); return; }
+      const results = document.getElementById("test-results");
+      results.textContent = "Running extraction test…";
+      const btn = document.getElementById("run-test"); btn.disabled = true;
+      try {
+        const res = await fetch("/admin/api/prompts/test", {
+          method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            evidence_text: evidence,
+            extractor_instructions: document.getElementById("extractor-prompt").value,
+            verifier_instructions: document.getElementById("verifier-prompt").value,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error?.message || "Test failed.");
+        results.replaceChildren();
+        if (!data.candidates.length) {
+          const p = document.createElement("p"); p.className = "hint"; p.textContent = "No candidates extracted.";
+          results.append(p);
+        }
+        for (const [i, c] of data.candidates.entries()) {
+          const card = document.createElement("div"); card.className = "test-candidate";
+          const title = document.createElement("h4");
+          title.textContent = "Candidate " + i + ": " + (c.candidate_kind || c.type || "?") + " · explicit=" + c.explicit;
+          const text = document.createElement("div"); text.className = "detail-content";
+          text.textContent = c.canonical_text || "(no canonical_text)";
+          const v = data.verdicts.find(v => v.candidate_index === i);
+          if (v) {
+            const verdict = document.createElement("div");
+            verdict.className = "test-verdict " + v.verdict;
+            verdict.textContent = v.verdict.toUpperCase() + " — " + v.reason;
+            card.append(title, text, verdict);
+          } else {
+            card.append(title, text);
+          }
+          results.append(card);
+        }
+        if (data.rawExtractor) {
+          const details = document.createElement("details"); const summary = document.createElement("summary");
+          summary.textContent = "Raw extractor output"; details.append(summary);
+          const raw = document.createElement("div"); raw.className = "test-raw"; raw.textContent = data.rawExtractor;
+          details.append(raw); results.append(details);
+        }
+        if (data.rawVerifier) {
+          const details = document.createElement("details"); const summary = document.createElement("summary");
+          summary.textContent = "Raw verifier output"; details.append(summary);
+          const raw = document.createElement("div"); raw.className = "test-raw"; raw.textContent = data.rawVerifier;
+          details.append(raw); results.append(details);
+        }
+      } catch (cause) {
+        results.textContent = cause instanceof Error ? cause.message : "Test failed.";
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    loadPrompts();
     refresh();
   </script>
 </body>
