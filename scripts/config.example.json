@@ -1,0 +1,5 @@
+{
+  "base_url": "https://your-cf-rag-domain.com/memory",
+  "token": "your_project_or_api_token_here",
+  "owner_id": "owner_your_user_id_here"
+}
