@@ -11,7 +11,7 @@ import { flushReadyEvidenceGroups, processProfileJobs } from "./memory/profile";
 // Each job runs up to three sequential extractor calls with a 60s timeout each,
 // so three jobs is ~9 minutes worst case — within the waitUntil budget, while
 // lifting throughput from 12 to 36 jobs/hour at the current 5-minute cron.
-const PROFILE_JOBS_PER_TICK = 3;
+const PROFILE_JOBS_PER_TICK = 10;
 
 function getRequiredApiToken(env: Pick<Env, "API_TOKEN">): string | null {
   const token = env.API_TOKEN?.trim();

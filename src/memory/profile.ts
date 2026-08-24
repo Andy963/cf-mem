@@ -78,28 +78,49 @@ const CLAIM_TYPES = new Set(["preference", "instruction", "decision", "profile",
 
 function normalizedExtractorCandidate(value: unknown): ExtractedClaim | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const candidate = value as Record<string, unknown>;
-  if (typeof candidate.operation === "string") return candidate as unknown as ExtractedClaim;
-  if (!candidate.operation || typeof candidate.operation !== "object" || Array.isArray(candidate.operation)) {
-    return candidate as unknown as ExtractedClaim;
+  let candidate = value as Record<string, unknown>;
+  if (candidate.operation && typeof candidate.operation === "object" && !Array.isArray(candidate.operation)) {
+    const nested = candidate.operation as Record<string, unknown>;
+    candidate = { ...candidate, ...nested, operation: "create" };
   }
 
-  // Some OpenRouter model responses place a complete create payload in
-  // `operation` instead of returning `operation: "create"` beside it.
-  // Recover only a self-contained create, never an update or retraction.
-  const nested = candidate.operation as Record<string, unknown>;
-  if (
-    !CLAIM_TYPES.has(String(nested.type))
-    || typeof nested.subject !== "string"
-    || typeof nested.memory_key !== "string"
-    || typeof nested.canonical_text !== "string"
-    || !Object.prototype.hasOwnProperty.call(nested, "value")
-    || Object.prototype.hasOwnProperty.call(nested, "claim_id")
-    || Object.prototype.hasOwnProperty.call(nested, "replaces_claim_id")
-  ) {
-    return candidate as unknown as ExtractedClaim;
+  const typeStr = typeof candidate.type === "string" ? candidate.type : undefined;
+  const kindStr = typeof candidate.candidate_kind === "string" ? candidate.candidate_kind : undefined;
+  const effectiveType = (typeStr && CLAIM_TYPES.has(typeStr))
+    ? typeStr
+    : (kindStr && CLAIM_TYPES.has(kindStr) ? kindStr : undefined);
+  const effectiveKind = kindStr ?? effectiveType;
+
+  let applicability: "global" | "semantic" | "workspace" = "semantic";
+  if (typeof candidate.applicability === "string") {
+    const appLower = candidate.applicability.toLowerCase();
+    if (appLower === "global" || appLower === "always" || appLower.includes("所有") || appLower.includes("全局")) {
+      applicability = "global";
+    } else if (appLower === "workspace" || appLower.includes("工作区")) {
+      applicability = "workspace";
+    } else {
+      applicability = "semantic";
+    }
   }
-  return { ...candidate, ...nested, operation: "create" } as ExtractedClaim;
+
+  const explicit = candidate.explicit !== false;
+  const agentRelevance = candidate.agent_relevance === "contextual" || candidate.agent_relevance === "global_behavior"
+    ? candidate.agent_relevance
+    : "global_behavior";
+
+  const val = candidate.value !== undefined ? candidate.value : candidate.canonical_text;
+  const op = typeof candidate.operation === "string" ? candidate.operation : "create";
+
+  return {
+    ...candidate,
+    type: effectiveType,
+    candidate_kind: effectiveKind as any,
+    applicability,
+    explicit,
+    agent_relevance: agentRelevance,
+    value: val,
+    operation: op as any,
+  } as ExtractedClaim;
 }
 
 function configuredOwner(env: Env): string {
@@ -679,8 +700,7 @@ function stringLeavesContainChinese(value: unknown): boolean {
 }
 
 function isChineseClaimText(candidate: ExtractedClaim): boolean {
-  if (typeof candidate.canonical_text !== "string" || !containsChinese(candidate.canonical_text)) return false;
-  return stringLeavesContainChinese(candidate.value);
+  return typeof candidate.canonical_text === "string" && containsChinese(candidate.canonical_text);
 }
 
 /**
@@ -1101,10 +1121,17 @@ export async function processProfileJob(env: Env, id: string): Promise<void> {
     const scope: ProjectScope = { projectId: job.project_id, namespace: `project:${job.project_id}` };
     const evidenceIds = jobEvidenceIds(job);
     const evidence = await fetchByIds(env.DB, job.project_id, evidenceIds);
-    if (evidence.size !== evidenceIds.length) throw new Error("profile_evidence_missing");
-    const webReferenceIds = webReferenceIdsIn(evidence, evidenceIds);
-    const evidenceText = boundedEvidenceText(evidence, evidenceIds);
-    if (!evidenceText) throw new Error("profile_evidence_empty");
+    if (evidence.size === 0) {
+      await completeJob(env, job, "evidence_pruned");
+      return;
+    }
+    const survivingEvidenceIds = evidenceIds.filter((eid) => evidence.has(eid));
+    const webReferenceIds = webReferenceIdsIn(evidence, survivingEvidenceIds);
+    const evidenceText = boundedEvidenceText(evidence, survivingEvidenceIds);
+    if (!evidenceText) {
+      await completeJob(env, job, "evidence_empty");
+      return;
+    }
     const activeClaims = await fetchOwnerClaims(env, job.project_id, job.owner_id);
     const candidates = await callExtractor(env, evidenceText, activeClaims, job.workspace_id);
     const verdicts = await verifyCandidates(env, candidates, evidenceText);
