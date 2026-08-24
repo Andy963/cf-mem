@@ -28,6 +28,9 @@
 - `GET /memory/claims`
 - `POST /memory/forget`
 - `GET /admin`（Cloudflare Access 保护的只读管理页）
+- `GET /admin/api/claims`（admin 专用：筛选、搜索和分页查看 claims）
+- `GET /admin/api/claims/:id`（admin 专用：查看 claim 及关联证据）
+- `PUT /admin/api/claims/:id`、`POST /admin/api/claims/:id/retract`、`POST /admin/api/claims/:id/tags`、`DELETE /admin/api/claims/:id/tags/:tag`（admin 专用：带审计的管理操作）
 
 ## 快速开始（部署到你的 Cloudflare 账号）
 
@@ -133,8 +136,12 @@ npm run deploy
 
 ## Admin dashboard
 
-`/admin` is a read-only usage overview. It shows aggregate active claim, raw segment, storage, and
-per-project usage figures; it does not expose segment text, claim text, API tokens, or write actions.
+`/admin` is a read-only memory console. It shows aggregate active claim, raw segment, storage, and
+per-project usage figures, and lets the administrator filter, search, and inspect full extracted
+claims. The detail pane shows the structured value and linked raw evidence text. It has no write
+actions outside the administrator's explicit edits, retractions, and tag changes. These changes
+are recorded with the Cloudflare Access email, timestamp, reason, and before/after snapshots; the
+original claim is never physically deleted. It never exposes API tokens.
 
 Protect both `emb.example.com/admin*` and `emb.example.com/admin/api/*` with one Cloudflare Access
 Application. Configure the Access policy to allow the administrator's email, then set the same
