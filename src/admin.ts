@@ -209,6 +209,21 @@ async function retractAdminClaim(env: Env, request: Request, claimId: string, bo
   await syncAdminClaimVector(env, updated);
 }
 
+async function deleteAdminClaim(env: Env, request: Request, claimId: string, _body: unknown): Promise<void> {
+  const claim = await requireAdminClaim(env, claimId);
+  await env.DB.prepare("DELETE FROM memory_claim_tags WHERE project_id = ? AND claim_id = ?").bind(claim.project_id, claim.id).run();
+  await env.DB.prepare("DELETE FROM memory_evidence WHERE project_id = ? AND claim_id = ?").bind(claim.project_id, claim.id).run();
+  await env.DB.prepare("DELETE FROM memory_claim_audit_log WHERE project_id = ? AND claim_id = ?").bind(claim.project_id, claim.id).run();
+  await env.DB.prepare("DELETE FROM memory_claims WHERE project_id = ? AND id = ?").bind(claim.project_id, claim.id).run();
+  if (env.CLAIMS_INDEX?.deleteByIds) {
+    try {
+      await env.CLAIMS_INDEX.deleteByIds([claim.id]);
+    } catch (e) {
+      console.error(`[admin] failed to delete vector for claim ${claim.id}: ${e}`);
+    }
+  }
+}
+
 async function mutateAdminTag(env: Env, request: Request, claimId: string, tag: string, add: boolean, body: unknown): Promise<void> {
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(tag)) throw new Error("tag must use lowercase letters, numbers, hyphens, or underscores");
   const reason = body && typeof body === "object" && !Array.isArray(body) ? optionalReason((body as Record<string, unknown>).reason) : null;
@@ -424,6 +439,10 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       requireSameOrigin(request);
       const body = await parseJson(request);
       if (method === "PUT" && !detailMatch[2]) await updateAdminClaim(env, request, claimId, body);
+      else if (method === "DELETE" && !detailMatch[2]) {
+        await deleteAdminClaim(env, request, claimId, body);
+        return jsonResponse(env, { ok: true, deleted: true }, { headers: { "Cache-Control": "no-store" } });
+      }
       else if (method === "POST" && detailMatch[2] === "retract") await retractAdminClaim(env, request, claimId, body);
       else if (method === "POST" && detailMatch[2] === "tags") {
         const tag = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).tag : null;
@@ -559,6 +578,11 @@ const DASHBOARD_HTML = `<!doctype html>
     .tag { display: inline-block; margin: 2px 4px 2px 0; padding: 3px 7px; color: #b9cef9; border-radius: 999px; background: #243251; font-size: 12px; }
     .source { display: inline-block; margin: 5px 4px 0 0; color: #91d8ca; font-size: 12px; font-weight: 650; }
     .danger { color: #ffd4d4; border-color: #8c4c4c; background: #54282d; } .danger:hover { background: #70333a; }
+    .claim-ops { white-space: nowrap; }
+    .op-button { padding: 3px 8px; margin-right: 6px; font-size: 12px; font-weight: 600; border-radius: 6px; border: 1px solid #426471; background: #1a2533; color: #b9cef9; cursor: pointer; }
+    .op-button:hover { background: #233448; color: #6ed2bc; }
+    .op-button.danger-op { color: #ffb5b5; border-color: #7b4646; background: #3a2227; }
+    .op-button.danger-op:hover { background: #54282d; color: #ffd4d4; }
     .pager { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 20px; border-top: 1px solid #293746; color: #9fb0c2; font-size: 13px; }
     .pager div { display: flex; gap: 8px; }
     button:disabled { cursor: not-allowed; opacity: .45; }
@@ -622,7 +646,7 @@ const DASHBOARD_HTML = `<!doctype html>
         <select id="claim-type" aria-label="Filter by type"><option value="">All types</option><option value="preference">Preference</option><option value="instruction">Instruction</option><option value="decision">Decision</option><option value="profile">Profile</option><option value="task_state">Task state</option></select>
         <button type="submit">Filter</button>
       </form>
-      <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Type / scope</th><th>Status</th><th>Confidence</th><th>Updated</th></tr></thead><tbody id="claim-rows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Type / scope</th><th>Status</th><th>Confidence</th><th>Updated</th><th>Operations</th></tr></thead><tbody id="claim-rows"></tbody></table></div>
       <div class="pager"><span id="page-label">—</span><div><button type="button" id="previous-page">Previous</button><button type="button" id="next-page">Next</button></div></div>
     </section>
     <section class="table-card" id="prompt-section" aria-labelledby="prompt-title">
@@ -651,7 +675,7 @@ const DASHBOARD_HTML = `<!doctype html>
     </section>
   </main>
   <dialog id="claim-dialog">
-    <div class="dialog-head"><h2>Claim detail</h2><div class="dialog-actions"><button type="button" id="edit-claim">Edit</button><button type="button" id="add-tag">Add tag</button><button type="button" class="danger" id="retract-claim">Retract</button><button type="button" id="close-dialog">Close</button></div></div>
+    <div class="dialog-head"><h2>Claim detail</h2><div class="dialog-actions"><button type="button" id="edit-claim">Edit</button><button type="button" id="add-tag">Add tag</button><button type="button" class="danger" id="retract-claim">Retract</button><button type="button" class="danger" id="delete-claim">Delete</button><button type="button" id="close-dialog">Close</button></div></div>
     <div id="claim-detail"></div>
   </dialog>
   <script>
@@ -699,7 +723,7 @@ const DASHBOARD_HTML = `<!doctype html>
         rows.replaceChildren();
         if (!data.projects.length) {
           const row = document.createElement("tr"); const cell = document.createElement("td");
-          cell.colSpan = 5; cell.className = "empty"; cell.textContent = "No memory data has been indexed yet.";
+          cell.colSpan = 6; cell.className = "empty"; cell.textContent = "No memory data has been indexed yet.";
           row.append(cell); rows.append(row); return;
         }
         for (const project of data.projects) {
@@ -729,7 +753,7 @@ const DASHBOARD_HTML = `<!doctype html>
         const rows = document.getElementById("claim-rows"); rows.replaceChildren();
         if (!data.claims.length) {
           const row = document.createElement("tr"); const cell = document.createElement("td");
-          cell.colSpan = 5; cell.className = "empty"; cell.textContent = "No claims match these filters.";
+          cell.colSpan = 6; cell.className = "empty"; cell.textContent = "No claims match these filters.";
           row.append(cell); rows.append(row);
         }
         for (const claim of data.claims) {
@@ -743,6 +767,13 @@ const DASHBOARD_HTML = `<!doctype html>
           const statusCell = document.createElement("td"); statusCell.append(badge(claim.status)); row.append(statusCell);
           row.append(createCell((claim.confidence * 100).toFixed(0) + "%"));
           row.append(createCell(formatDate(claim.updated_at)));
+          const opCell = document.createElement("td"); opCell.className = "claim-ops";
+          const editBtn = document.createElement("button"); editBtn.type = "button"; editBtn.className = "op-button"; editBtn.textContent = "edit";
+          editBtn.addEventListener("click", (e) => { e.stopPropagation(); quickEditClaim(claim); });
+          const delBtn = document.createElement("button"); delBtn.type = "button"; delBtn.className = "op-button danger-op"; delBtn.textContent = "del";
+          delBtn.addEventListener("click", (e) => { e.stopPropagation(); quickDeleteClaim(claim); });
+          opCell.append(editBtn, delBtn);
+          row.append(opCell);
           rows.append(row);
         }
         setText("claims-count", formatNumber.format(data.total) + " matching claims");
@@ -837,6 +868,32 @@ const DASHBOARD_HTML = `<!doctype html>
       try {
         await adminMutation("/admin/api/claims/" + encodeURIComponent(claim.id), "PUT", { canonical_text: canonicalText, value: JSON.parse(rawValue), reason: prompt("Reason for this edit (optional):") || null });
       } catch (cause) { showError(cause instanceof Error ? cause.message : "Claim edit failed."); }
+    });
+    async function quickEditClaim(claim) {
+      const canonicalText = prompt("Claim text:", claim.canonical_text); if (canonicalText === null || !canonicalText.trim()) return;
+      const rawValue = prompt("Structured JSON value:", claim.value_json || JSON.stringify(canonicalText.trim()));
+      if (rawValue === null) return;
+      try {
+        let val = canonicalText.trim();
+        try { val = JSON.parse(rawValue); } catch { val = rawValue; }
+        await adminMutation("/admin/api/claims/" + encodeURIComponent(claim.id), "PUT", { canonical_text: canonicalText.trim(), value: val, reason: "admin edit" });
+      } catch (cause) { showError(cause instanceof Error ? cause.message : "Claim edit failed."); }
+    }
+    async function quickDeleteClaim(claim) {
+      if (!confirm('Delete claim "' + claim.canonical_text + '" permanently?')) return;
+      try {
+        await adminMutation("/admin/api/claims/" + encodeURIComponent(claim.id), "DELETE", { reason: "admin delete" });
+        if (claimState.currentClaim && claimState.currentClaim.id === claim.id) {
+          document.getElementById("claim-dialog").close();
+        }
+      } catch (cause) { showError(cause instanceof Error ? cause.message : "Claim deletion failed."); }
+    }
+    document.getElementById("delete-claim").addEventListener("click", async () => {
+      const claim = claimState.currentClaim; if (!claim || !confirm('Delete claim "' + claim.canonical_text + '" permanently?')) return;
+      try {
+        await adminMutation("/admin/api/claims/" + encodeURIComponent(claim.id), "DELETE", { reason: "admin delete" });
+        document.getElementById("claim-dialog").close();
+      } catch (cause) { showError(cause instanceof Error ? cause.message : "Claim deletion failed."); }
     });
     document.getElementById("retract-claim").addEventListener("click", async () => {
       const claim = claimState.currentClaim; if (!claim || !confirm("Retract this claim? It will stop being used for retrieval.")) return;
