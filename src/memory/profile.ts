@@ -271,7 +271,6 @@ async function callExtractorLlm(
         model: config.model,
         temperature: 0,
         max_tokens: maxTokens,
-        reasoning: { effort: "none", exclude: true },
         messages: [
           { role: "system", content: systemPrompt },
           { role: "user", content: fullInput },
@@ -292,7 +291,10 @@ async function callExtractorLlm(
       body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`${errorPrefix}_http_${response.status}`);
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      throw new Error(`${errorPrefix}_http_${response.status}:${errText.slice(0, 300)}`);
+    }
     const payload = await response.json() as {
       choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown; reasoning?: unknown; reasoning_details?: unknown } }>;
       output?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>;
