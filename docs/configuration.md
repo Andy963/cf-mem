@@ -58,7 +58,7 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 | --- | --- | --- |
 | `EMBEDDING_MODEL` | `@cf/baai/bge-m3` | Workers AI embedding 模型 |
 | `CORS_ALLOW_ORIGIN` | `*` | CORS 允许的来源；生产环境建议改成实际来源 |
-| `PERSONAL_MEMORY_PROJECT_ID` | `personal` | `PERSONAL_MEMORY_TOKEN 对应的项目 ID |
+| `PERSONAL_MEMORY_PROJECT_ID` | `personal` | `PERSONAL_MEMORY_TOKEN` 对应的项目 ID |
 | `PERSONAL_MEMORY_OWNER_ID` | 无 | 开启 `/memory/profile/ingest` 时必填，用于个人记忆归属 |
 | `TAVILY_BASE_URL` | 无 | Tavily Worker 地址，例如 `https://tavily.example.com` |
 | `RERANK_MODEL` | `@cf/baai/bge-reranker-base` | `/memory/search` 的精排模型 |
@@ -109,7 +109,7 @@ OpenRouter，`PROFILE_EXTRACTOR_APP_URL` 会作为 `HTTP-Referer`，`PROFILE_EXT
 
 ## Claims 语义去重
 
-默认配置已经写在 `wrangler.toml.example` 中，通常不需要修改：
+默认已启用，所有参数都有内置默认值，通常不需要在 `wrangler.toml` 里配置任何东西：
 
 | 名称 | 默认值 | 作用 |
 | --- | --- | --- |
