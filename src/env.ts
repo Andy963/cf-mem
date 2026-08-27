@@ -23,7 +23,12 @@ export interface VectorizeIndex {
   ): Promise<void>;
   query(
     values: number[],
-    options: { topK: number; namespace?: string; filter?: Record<string, Primitive> },
+    options: {
+      topK: number;
+      namespace?: string;
+      filter?: Record<string, Primitive>;
+      returnValues?: boolean;
+    },
   ): Promise<VectorizeQueryResult>;
   deleteByIds?(ids: string[]): Promise<void>;
 }
@@ -59,6 +64,12 @@ export interface Env {
   RAW_MEMORY_RETENTION_DAYS?: string;
   RAW_MEMORY_MAX_BYTES_PER_PROJECT?: string;
   RAW_MEMORY_TARGET_BYTES_PER_PROJECT?: string;
+
+  CLAIM_DEDUP_SAME_SCORE?: string;
+  CLAIM_DEDUP_REVIEW_MIN_SCORE?: string;
+  CLAIM_DEDUP_TOP_K?: string;
+  CLAIM_DEDUP_LLM_ENABLED?: string;
+  CLAIM_DEDUP_AUTO_REPLACE?: string;
 
   TAVILY_API_TOKEN?: string;
   TAVILY_BASE_URL?: string;

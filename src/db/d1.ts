@@ -158,6 +158,21 @@ export async function fetchActiveClaimByIdentity(
   return result ?? null;
 }
 
+export async function fetchActiveClaimsBySemanticScope(
+  db: D1Database,
+  projectId: string,
+  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "type" | "workspaceId">,
+  now: number,
+): Promise<StoredClaimRow[]> {
+  const result = await db
+    .prepare(
+      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND type = ? AND COALESCE(workspace_id, '') = COALESCE(?, '') AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?)`,
+    )
+    .bind(projectId, claim.scopeKind, claim.scopeId, claim.type, claim.workspaceId, now, now)
+    .all<StoredClaimRow>();
+  return result.results;
+}
+
 function insertClaimStatement(
   db: D1Database,
   projectId: string,

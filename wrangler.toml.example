@@ -48,6 +48,13 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # attributed to "unknown".
 # PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-rag"
 # PROFILE_EXTRACTOR_APP_TITLE = "cf-rag"
+# Claim semantic deduplication. The claim metadata indexes should be created
+# before using filtered semantic deduplication.
+CLAIM_DEDUP_SAME_SCORE = "0.92"
+CLAIM_DEDUP_REVIEW_MIN_SCORE = "0.75"
+CLAIM_DEDUP_TOP_K = "12"
+CLAIM_DEDUP_LLM_ENABLED = "true"
+CLAIM_DEDUP_AUTO_REPLACE = "false"
 # /memory/* requires a PROJECT_TOKENS_JSON secret such as:
 # {"proj-a":"token-for-a","proj-b":"token-for-b"}
 # Profile extractor also needs secrets:

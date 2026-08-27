@@ -1,6 +1,6 @@
 import { embedTexts } from "../ai/embedding";
 import type { StoredClaimRow } from "../db/d1";
-import type { Env } from "../env";
+import type { Env, Primitive } from "../env";
 import { toQueryMatches } from "../vector/vectorize";
 
 function claimNamespace(projectId: string): string {
@@ -43,6 +43,35 @@ export async function syncClaimVector(env: Env, claim: StoredClaimRow): Promise<
   }
 }
 
+export async function findVectorizedClaimMatches(
+  env: Env,
+  options: {
+    projectId: string;
+    vector: number[];
+    topK: number;
+    filter?: Record<string, Primitive>;
+  },
+): Promise<Array<{ id: string; score: number }>> {
+  if (!env.CLAIMS_INDEX) return [];
+  const queryOptions: {
+    topK: number;
+    namespace: string;
+    filter?: Record<string, Primitive>;
+    returnValues: boolean;
+  } = {
+    topK: options.topK,
+    namespace: claimNamespace(options.projectId),
+    // Threshold decisions must use exact scores rather than Vectorize's
+    // approximate default scores.
+    returnValues: true,
+  };
+  if (options.filter) queryOptions.filter = options.filter;
+  const result = await env.CLAIMS_INDEX.query(options.vector, queryOptions);
+  return toQueryMatches(result)
+    .filter((match): match is { id: string; score: number } => typeof match.id === "string" && match.id.length > 0 && typeof match.score === "number")
+    .map((match) => ({ id: match.id, score: match.score }));
+}
+
 export async function searchClaimMatches(
   env: Env,
   options: { projectId: string; query: string; topK: number },
@@ -50,14 +79,9 @@ export async function searchClaimMatches(
   if (!env.CLAIMS_INDEX || !options.query.trim()) return [];
   const [vector] = await embedTexts(env, [options.query]);
   if (!vector) return [];
-  const result = await env.CLAIMS_INDEX.query(vector, {
+  return findVectorizedClaimMatches(env, {
+    projectId: options.projectId,
+    vector,
     topK: options.topK,
-    namespace: claimNamespace(options.projectId),
-    // No filter: D1 validates status and scope after retrieval, so this small
-    // project-namespaced candidate set does not need a Vectorize metadata index.
-    // An empty object is not the same as omitting the field here.
   });
-  return toQueryMatches(result)
-    .filter((match): match is { id: string; score: number } => typeof match.id === "string" && match.id.length > 0 && typeof match.score === "number")
-    .map((match) => ({ id: match.id, score: match.score }));
 }
