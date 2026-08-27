@@ -23,10 +23,11 @@ decisions, profile facts, and task state without encoding any product-domain rul
 
 ## Current State
 
-`memory_segments` stores raw text in D1 and its embedding in Vectorize. `/memory/index`
+`memory_segments` stores raw text in D1 and its embedding in Vectorize. Durable claims
+are stored in `memory_claims` with evidence links in `memory_evidence`; `/memory/index`
 deduplicates identical content for an id, while `/memory/search` performs vector
-retrieval with an optional reranker. It has no durable-memory type, provenance,
-version, conflict, or evidence model.
+retrieval with an optional reranker. `/memory/claims` supports deterministic identity
+checks plus scope-local semantic deduplication backed by a dedicated Vectorize index.
 
 ## Target Data Model
 
@@ -70,6 +71,13 @@ evidence link is always project-scoped.
 5. A replacement creates a new claim and marks the old active claim as
    `superseded`; historical claims are never overwritten.
 6. A retraction changes status to `retracted` and retains its evidence trail.
+7. Semantic deduplication only compares active, currently valid claims with the same
+   project, scope, type, and workspace. Vectorize results are narrowed by metadata
+   filters, while D1 remains the final authority for status and validity.
+8. During Vectorize's eventual-consistency window, claims missing from the vector
+   result are re-embedded from D1 before a create decision is made.
+9. The semantic read/decide/write sequence is guarded by a short D1 lease lock to
+   prevent concurrent requests from inserting the same semantic claim.
 
 ## API Contract
 
@@ -155,9 +163,14 @@ address is a known, accepted gap.
 1. Add a dedicated `CLAIMS_INDEX` Vectorize binding and
    `project:<project_id>:claims` namespace.
 2. Embed only active claim text; remove or update vectors on supersede/retract.
-3. Fuse deterministic active instructions/preferences with semantic claim matches and
+3. Use status, scope, type, and workspace metadata filters before topK truncation, and
+   use exact cosine scores for threshold decisions.
+4. Use a D1 candidate fallback when newly written vectors are not query-visible yet.
+5. Serialize semantic create decisions with a short-lived D1 lease lock.
+6. Fuse deterministic active instructions/preferences with semantic claim matches and
    raw evidence matches.
-4. Keep D1 status and scope checks as the final authority after vector retrieval.
+7. Keep D1 status, scope, validity, and project checks as the final authority after
+   vector retrieval.
 
 ### Phase 4: Whisper integration
 
@@ -172,9 +185,10 @@ address is a known, accepted gap.
 ### Phase 5: Evaluation and operations
 
 Maintain regression cases for explicit preferences, reinforcement, replacement,
-retraction, transient statements, model-inferred candidates, project isolation, and
-evidence traceability. Track extraction precision, conflict rate, stale-memory rate,
-and context-token budget.
+retraction, transient statements, model-inferred candidates, project isolation, evidence
+traceability, Vectorize eventual consistency, and concurrent claim writes. Track extraction
+precision, conflict rate, stale-memory rate, duplicate rate, lock contention, and
+context-token budget.
 
 ## Implementation Status
 

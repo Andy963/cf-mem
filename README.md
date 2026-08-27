@@ -63,6 +63,10 @@ npx wrangler d1 create cf-text
 npx wrangler vectorize create cf-vector --dimensions 1024 --metric cosine
 npx wrangler vectorize create cf-claims --dimensions 1024 --metric cosine
 npx wrangler vectorize create-metadata-index cf-claims --property-name status --type string
+npx wrangler vectorize create-metadata-index cf-claims --property-name scope_kind --type string
+npx wrangler vectorize create-metadata-index cf-claims --property-name scope_id --type string
+npx wrangler vectorize create-metadata-index cf-claims --property-name type --type string
+npx wrangler vectorize create-metadata-index cf-claims --property-name workspace_id --type string
 ```
 
 初始化 D1 schema（应用全部 migrations）：
@@ -178,6 +182,11 @@ policy and could allow a forged header to bypass the Worker-level email check.
 - `PROFILE_BATCH_MAX_SEGMENTS`（var，可选）：evidence 攒批的条数阈值，默认 `24`
 - `PROFILE_BATCH_IDLE_MS`（var，可选）：尾批的空闲 flush 超时，默认 `900000`（15 分钟）
 - `CORS_ALLOW_ORIGIN`（var，可选）：默认 `*`
+- `CLAIM_DEDUP_SAME_SCORE`（var，可选）：claim 语义去重的“同义”相似度阈值，默认 `0.92`；达到即自动转 reinforce
+- `CLAIM_DEDUP_REVIEW_MIN_SCORE`（var，可选）：进入 LLM 裁决的灰区下限，默认 `0.75`；低于此值直接视为新事实插入，若高于 `CLAIM_DEDUP_SAME_SCORE` 会自动钳制
+- `CLAIM_DEDUP_TOP_K`（var，可选）：写入时向量召回的候选数上限（1–50），默认 `12`
+- `CLAIM_DEDUP_LLM_ENABLED`（var，可选）：默认 `true`；复用 Profile Extractor 配置裁决灰区相似 claim，未配置抽取器或设为 `false` 时灰区直接放行插入
+- `CLAIM_DEDUP_AUTO_REPLACE`（var，可选）：默认 `false`；设为 `true` 后 LLM 判定为“同一事实的新状态”时自动替换旧 active claim，否则报错提示调用方改用 supersede
 
 ## 项目隔离模型
 
@@ -481,6 +490,19 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
 - `reinforce`：为现有 active claim 增加证据，并可提高置信度。
 - `supersede`：创建替代 claim，将同一 canonical key 的旧 active claim 标记为 `superseded`。
 - `retract`：将指定 active claim 标记为 `retracted`。
+
+除上述身份键查重外，`create` 还会做一层语义去重：无身份匹配时，用新 claim 的
+`canonical_text` 在 `cf-claims` 向量索引中使用精确 cosine 分数召回同 scope、同 type 的候选。
+必须预先为 `status`、`scope_kind`、`scope_id`、`type`、`workspace_id` 建立 metadata index，
+这样过滤会在 topK 截断前执行。相似度 ≥
+`CLAIM_DEDUP_SAME_SCORE`（默认 `0.92`）视为同义事实，自动转为 reinforce；低于
+`CLAIM_DEDUP_REVIEW_MIN_SCORE`（默认 `0.75`）视为新事实直接插入；之间的灰区交给配置的
+LLM（Profile Extractor 端点）三选一裁决：`same` 转 reinforce、`update` 按
+`CLAIM_DEDUP_AUTO_REPLACE` 决定是否自动替换（默认关闭，报错提示改用 supersede）、`conflict`
+拒绝写入并提示走显式操作。LLM 不可用时灰区降级为直接插入，宁可暂存可能重复的 claim，也不静默合并。
+`PROFILE_EXTRACTOR_PROTOCOL=responses` 时灰区裁决使用 Responses API；并发写入按 project/scope/type/workspace
+加 D1 lease 锁，避免多个请求同时通过语义检查。Vectorize 写入存在延迟可见窗口时，Worker
+会从同一语义 scope 的 D1 active claims 取回未出现在向量结果中的候选，重新嵌入后参与 cosine 比较。
 
 显式用户来源的 claim 必须提供同项目中已有的 `evidence_segment_ids`。例如：
 
