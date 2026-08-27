@@ -38,6 +38,7 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # RERANK_DEFAULT_ENABLED = "true"
 # Profile extractor: prefer PROFILE_EXTRACTOR_ENDPOINT. OPENROUTER_API_BASE is
 # accepted as a fallback when the dedicated endpoint var is unset.
+# These are optional until /memory/profile/ingest is enabled.
 # PROFILE_EXTRACTOR_ENDPOINT = "https://openrouter.ai/api/v1"
 # PROFILE_EXTRACTOR_MODEL = "your-openrouter-model"
 # PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
@@ -48,6 +49,9 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # attributed to "unknown".
 # PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-rag"
 # PROFILE_EXTRACTOR_APP_TITLE = "cf-rag"
+# PERSONAL_MEMORY_PROJECT_ID = "personal"
+# PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
+# TAVILY_BASE_URL = "https://tavily.example.com"
 # Claim semantic deduplication. The claim metadata indexes should be created
 # before using filtered semantic deduplication.
 CLAIM_DEDUP_SAME_SCORE = "0.92"
@@ -59,10 +63,9 @@ CLAIM_DEDUP_AUTO_REPLACE = "false"
 # {"proj-a":"token-for-a","proj-b":"token-for-b"}
 # Profile extractor also needs secrets:
 #   PROFILE_EXTRACTOR_API_KEY
-#   PROFILE_EXTRACTOR_ENDPOINT  (optional if OPENROUTER_API_BASE is set)
 # Web extraction via the Tavily relay also needs secrets:
 #   TAVILY_API_TOKEN  (the tavily-worker ingress token)
-#   TAVILY_BASE_URL   (for example https://tavily.example.com)
+#   TAVILY_BASE_URL is a normal variable above, not a secret.
 
 [triggers]
 crons = ["*/5 * * * *"]

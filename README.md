@@ -1,568 +1,224 @@
-# cf-rag（Cloudflare Workers AI + D1 + Vectorize）
+# cf-rag
 
-一个单 Worker 的 RAG 记忆后端：
+一个部署在 Cloudflare Workers 上的 RAG 与持久记忆后端。
 
-- embedding：调用 Cloudflare Workers AI 生成向量
-- text storage：把原文 + 元数据落到 D1（`cf-text`）
-- vector storage：把向量 + id + 少量可过滤 metadata 落到 Vectorize（`cf-vector`）
-- project isolation：`/memory/*` 按 project token + D1 `project_id` + Vectorize namespace 做硬隔离
+- 用 Workers AI 生成 embedding
+- 用 D1 保存原文、证据和结构化 Claims
+- 用 Vectorize 做相似度搜索
+- 按项目 token 隔离数据
 
-> 说明：`migrations/` 只用于初始化或升级 D1 表结构；Worker 运行时不会读取这些 SQL 文件。
+## 先看这里
 
-## Endpoints
+| 你想做什么 | 从哪里开始 |
+| --- | --- |
+| 第一次部署 | [三分钟部署](#三分钟部署) |
+| 查看完整配置 | [`docs/configuration.md`](docs/configuration.md) |
+| 查看 Claims 设计 | [`docs/durable-memory-design.md`](docs/durable-memory-design.md) |
+| 查看所有接口和进阶说明 | [`docs/complete-guide.md`](docs/complete-guide.md) |
 
-- `GET /`（同 `GET /health`）
-- `GET /health`
-- `POST /embed`（返回 Workers AI 原始结果，便于调试）
-- `POST /v1/embeddings`（OpenAI embeddings 兼容格式）
-- `POST /web/extract`（取网页正文：优先 Tavily Extract，逐 URL 回退到 Worker 直连抓取）
-- `POST /web/search`（Tavily Search，纯转发）
-- `POST /web/crawl`（Tavily Crawl，纯转发）
-- `GET /memory/health`
-- `POST /memory/index`
-- `POST /memory/search`
-- `POST /memory/claims`
-- `POST /memory/profile/ingest`
-- `POST /memory/extraction/ingest`
-- `POST /memory/context`
-- `GET /memory/claims`
-- `POST /memory/forget`
-- `GET /admin`（Cloudflare Access 保护的只读管理页）
-- `GET /admin/api/claims`（admin 专用：筛选、搜索和分页查看 claims）
-- `GET /admin/api/claims/:id`（admin 专用：查看 claim 及关联证据）
-- `PUT /admin/api/claims/:id`、`POST /admin/api/claims/:id/retract`、`POST /admin/api/claims/:id/tags`、`DELETE /admin/api/claims/:id/tags/:tag`（admin 专用：带审计的管理操作）
+## 三分钟部署
 
-## 快速开始（部署到你的 Cloudflare 账号）
+### 1. 安装并登录
 
-安装依赖：
+需要一个 Cloudflare 账号，并在本机完成 Wrangler 登录：
 
 ```bash
-cd cf-rag
 npm install
-```
-
-准备 `wrangler.toml`：
-
-仓库默认只追踪 `wrangler.toml.example`，你需要复制一份成本地的 `wrangler.toml`（该文件已在 `.gitignore` 中忽略）：
-
-```bash
+npx wrangler login
 cp wrangler.toml.example wrangler.toml
 ```
 
-创建 D1：
+`wrangler.toml` 已被 Git 忽略，只在本地保存部署配置。
+
+### 2. 创建 Cloudflare 资源
+
+以下资源名称需要和 `wrangler.toml` 保持一致。已经存在的资源不要重复创建。
 
 ```bash
 npx wrangler d1 create cf-text
-```
-
-把 `wrangler d1 create` 输出的 `database_id` 填回你本地的 `cf-rag/wrangler.toml`。
-
-创建 Vectorize（BGE-M3 维度为 1024）：
-
-```bash
 npx wrangler vectorize create cf-vector --dimensions 1024 --metric cosine
 npx wrangler vectorize create cf-claims --dimensions 1024 --metric cosine
-npx wrangler vectorize create-metadata-index cf-claims --property-name status --type string
-npx wrangler vectorize create-metadata-index cf-claims --property-name scope_kind --type string
-npx wrangler vectorize create-metadata-index cf-claims --property-name scope_id --type string
-npx wrangler vectorize create-metadata-index cf-claims --property-name type --type string
-npx wrangler vectorize create-metadata-index cf-claims --property-name workspace_id --type string
 ```
 
-初始化 D1 schema（应用全部 migrations）：
+把创建 D1 时返回的 `database_id` 填入本地 `wrangler.toml`，然后创建 Claims 的过滤索引：
+
+```bash
+for property in status scope_kind scope_id type workspace_id; do
+  npx wrangler vectorize create-metadata-index cf-claims \
+    --property-name "$property" --type string
+done
+```
+
+最后应用数据库迁移：
 
 ```bash
 npx wrangler d1 migrations apply cf-text --remote
 ```
 
-配置 embedding 鉴权（`/`、`/health`、`/embed`、`/v1/embeddings`）：
+### 3. 配置鉴权
 
 ```bash
+# 使用 embedding 或网页接口时需要
 npx wrangler secret put API_TOKEN
-```
 
-配置网页抓取（`/web/*`，复用 `API_TOKEN` 鉴权；两项都是可选的）：
-
-```bash
-npx wrangler secret put TAVILY_API_TOKEN
-npx wrangler secret put TAVILY_BASE_URL
-```
-
-`TAVILY_BASE_URL` 指向内部 Tavily Worker，例如 `https://tavily.example.com`。不要把这两个值放进
-`wrangler.toml` 的 `[vars]`，否则会随部署明文暴露。
-
-`POST /web/extract` 只需要 `{"urls": [...]}`（最多 10 个）。Tavily 配置齐全时优先走它；**未返回结果
-的 URL 会逐个回退到 Worker 直连抓取**，因此一个坏链接不再把整批拖到弱路径上。响应形状统一：
-
-```json
-{
-  "provider": "tavily|direct|mixed|none",
-  "results": [{ "url": "...", "final_url": "...", "title": "...", "raw_content": "...", "provider": "direct", "fetched_at": 0 }],
-  "failed_results": [{ "url": "...", "error": "HTTP 404" }]
-}
-```
-
-抓取受这些约束：仅 http/https、仅 80/443 端口、拒绝凭据式 URL、拒绝私有与本地地址（含 IPv4 映射与
-NAT64 形式的 IPv6）、手动逐跳校验重定向（最多 5 跳）、10s 超时、512KB 正文上限，只接受
-HTML/XHTML/纯文本。Worker 无法在 fetch 前做 DNS 解析，因此指向内网地址的公网域名不在防护范围内；
-需要登录态或内网的页面同样不在支持范围内。`/web/search` 与 `/web/crawl` 没有本地等价物，未配置
-Tavily 时返回 `503`。
-
-配置 memory 项目隔离（`/memory/*` 必填）：
-
-```bash
+# 使用项目级 /memory/* 时需要
 npx wrangler secret put PROJECT_TOKENS_JSON
 ```
 
-输入示例：
+`PROJECT_TOKENS_JSON` 是项目 ID 到 token 的映射，例如：
 
 ```json
-{"proj-a":"token-for-a","proj-b":"token-for-b"}
+{"proj-a":"替换成项目A的随机token"}
 ```
 
-部署：
+不要把 token 写进 `wrangler.toml`，也不要提交到 Git。
+
+### 4. 部署
 
 ```bash
+npm run typecheck
 npm run deploy
 ```
 
-## 自定义域名（可选）
+部署完成后，使用 Wrangler 输出的地址检查：
 
-默认不绑定自定义域名，只会部署到 `workers.dev` 域名上（由 Wrangler 输出）。
-
-如果你需要绑定自己的域名路由，在你本地的 `cf-rag/wrangler.toml` 里取消注释并修改：
-
-```toml
-# [[routes]]
-# pattern = "emb.example.com/*"
-# zone_name = "example.com"
+```bash
+curl -sS -H "Authorization: Bearer $API_TOKEN" \
+  https://<your-worker>/health
 ```
 
-## Admin dashboard
+## 需要配置什么？
 
-`/admin` is a read-only memory console. It shows aggregate active claim, raw segment, storage, and
-per-project usage figures, and lets the administrator filter, search, and inspect full extracted
-claims. The detail pane shows the structured value and linked raw evidence text. It has no write
-actions outside the administrator's explicit edits, retractions, and tag changes. These changes
-are recorded with the Cloudflare Access email, timestamp, reason, and before/after snapshots; the
-original claim is never physically deleted. It never exposes API tokens.
+大多数部署只需要根据实际接口选择上面的 secret。其他功能按需开启：
 
-Protect both `emb.example.com/admin*` and `emb.example.com/admin/api/*` with one Cloudflare Access
-Application. Configure the Access policy to allow the administrator's email, then set the same
-lowercase email as `ADMIN_ALLOWED_EMAIL` in `[vars]`. Access injects
-`Cf-Access-Authenticated-User-Email`; the Worker verifies it against that value before rendering
-the page or returning metrics.
+| 功能 | 额外配置 |
+| --- | --- |
+| 原始记忆 `/memory/*` | `PROJECT_TOKENS_JSON` |
+| 个人记忆自动提炼 | `PERSONAL_MEMORY_TOKEN`、`PERSONAL_MEMORY_OWNER_ID`、模型接口配置 |
+| 网页搜索和抓取 | `TAVILY_API_TOKEN`、`TAVILY_BASE_URL` |
+| 搜索精排 | `RERANK_DEFAULT_ENABLED`，或请求中的 `rerank.enabled` |
+| 管理后台 | Cloudflare Access、`ADMIN_ALLOWED_EMAIL` |
+| 语义去重 | 默认已启用；需要 `cf-claims` 及其 metadata index |
 
-For production, use a custom-domain route and set `workers_dev = false`. Otherwise the same Worker
-may also be available under a `workers.dev` address, which is outside the custom-domain Access
-policy and could allow a forged header to bypass the Worker-level email check.
+完整配置表、默认值和 secret 用法见
+[`docs/configuration.md`](docs/configuration.md)。不要为了使用基础 embedding 接口预先配置
+项目记忆、个人记忆、Tavily、精排或管理后台。
 
-## 配置项
+## 最小调用示例
 
-- `API_TOKEN`（secret，必填）：embedding 路由的统一鉴权 token
-- `PROJECT_TOKENS_JSON`（secret，必填）：`/memory/*` 的项目级 token 映射；token 只允许访问其绑定项目
-- `EMBEDDING_MODEL`（var，可选）：默认 `@cf/baai/bge-m3`
-- `RAW_MEMORY_RETENTION_DAYS`（var，可选）：raw segment 的保留期，默认 `90`
-- `RAW_MEMORY_MAX_BYTES_PER_PROJECT`（var，可选）：单个 project 的 raw logical-byte 上限，默认 `104857600`（100 MiB）
-- `RAW_MEMORY_TARGET_BYTES_PER_PROJECT`（var，可选）：触发上限后的清理目标，默认 `83886080`（80 MiB）
-- `RERANK_MODEL`（var，可选）：默认 `@cf/baai/bge-reranker-base`
-- `RERANK_DEFAULT_ENABLED`（var，可选）：默认 `false`；设为 `true` 可让 `/memory/search` 默认启用 rerank
-- `ADMIN_ALLOWED_EMAIL`（var，admin 必填）：允许访问 `/admin` 的 Cloudflare Access 登录邮箱，小写比较
-- `PROFILE_EXTRACTOR_PROTOCOL`（var，可选）：`chat_completions`（默认）或 `responses`
-- `PROFILE_EXTRACTOR_ENDPOINT`（var 或 secret，抽取必填）：OpenAI 兼容接口的 base URL，例如 `https://openrouter.ai/api/v1`
-- `OPENROUTER_API_BASE`（var，可选）：`PROFILE_EXTRACTOR_ENDPOINT` 未设置时的回退 base URL
-- `PROFILE_EXTRACTOR_MODEL`（var，抽取必填）：抽取/校验/对齐使用的模型名
-- `PROFILE_EXTRACTOR_APP_URL`（var，可选，默认 `https://github.com/Andy963/cf-rag`）：作为 `HTTP-Referer`
-  发出。OpenRouter 用这个 URL 作为 app 的唯一标识，缺了它 Activity 里的 app 一律是 unknown
-- `PROFILE_EXTRACTOR_APP_TITLE`（var，可选，默认 `cf-rag`）：作为 `X-OpenRouter-Title` 发出，只负责
-  给上面那个 URL 起显示名；单独发标题不会建出 app，共用一个 OpenRouter 账号时靠这两个头区分调用方
-- `PROFILE_EXTRACTOR_API_KEY`（secret，抽取必填）：抽取模型的 API key
-- `PROFILE_CONTEXT_MIN_SCORE`（var，可选）：profile 语义召回的最低相似度，默认 `0.55`
-- `PROFILE_BATCH_MAX_CHARS`（var，可选）：evidence 攒批的字符阈值，默认 `10000`
-- `PROFILE_BATCH_MAX_SEGMENTS`（var，可选）：evidence 攒批的条数阈值，默认 `24`
-- `PROFILE_BATCH_IDLE_MS`（var，可选）：尾批的空闲 flush 超时，默认 `900000`（15 分钟）
-- `CORS_ALLOW_ORIGIN`（var，可选）：默认 `*`
-- `CLAIM_DEDUP_SAME_SCORE`（var，可选）：claim 语义去重的“同义”相似度阈值，默认 `0.92`；达到即自动转 reinforce
-- `CLAIM_DEDUP_REVIEW_MIN_SCORE`（var，可选）：进入 LLM 裁决的灰区下限，默认 `0.75`；低于此值直接视为新事实插入，若高于 `CLAIM_DEDUP_SAME_SCORE` 会自动钳制
-- `CLAIM_DEDUP_TOP_K`（var，可选）：写入时向量召回的候选数上限（1–50），默认 `12`
-- `CLAIM_DEDUP_LLM_ENABLED`（var，可选）：默认 `true`；复用 Profile Extractor 配置裁决灰区相似 claim，未配置抽取器或设为 `false` 时灰区直接放行插入
-- `CLAIM_DEDUP_AUTO_REPLACE`（var，可选）：默认 `false`；设为 `true` 后 LLM 判定为“同一事实的新状态”时自动替换旧 active claim，否则报错提示调用方改用 supersede
+### 生成 embedding
 
-## 项目隔离模型
+```bash
+curl -sS \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  https://<your-worker>/v1/embeddings \
+  -d '{"input":["你好，世界"]}'
+```
 
-`/memory/*` 现在默认按项目硬隔离：
+### 写入原始记忆
 
-1. 每个请求先用 `PROJECT_TOKENS_JSON` 把 token 解析为唯一 `project_id`
-2. 写入 D1 时强制写入 `project_id`
-3. 写入 Vectorize 时强制写入 `namespace = project:<project_id>`
-4. 查询 Vectorize 时固定只查当前项目 namespace
-5. 即使请求体自己传了 `project_id`，也只能与鉴权项目一致；不一致直接返回 `400`
+```bash
+curl -sS \
+  -H "Authorization: Bearer $PROJECT_TOKEN" \
+  -H "Content-Type: application/json" \
+  https://<your-worker>/memory/index \
+  -d '{"text":"用户喜欢简洁的回答。","metadata":{"session_id":"s1","kind":"note"}}'
+```
 
-这意味着：
+### 搜索原始记忆
 
-- 不同项目不会共享同一个 Vectorize namespace
-- 不同项目不会通过 API 读到彼此的 memory 数据
+```bash
+curl -sS \
+  -H "Authorization: Bearer $PROJECT_TOKEN" \
+  -H "Content-Type: application/json" \
+  https://<your-worker>/memory/search \
+  -d '{"query":"用户喜欢什么样的回答？","topK":5}'
+```
 
-### project_id 长度约束
+### 写入持久记忆
 
-Vectorize 的 vector id 上限是 64 字节，而 segment id 的实际形式是
-`project:<project_id>:<segment_id>`，因此 `project_id` 会直接吃掉这个预算：
+```bash
+curl -sS \
+  -H "Authorization: Bearer $PROJECT_TOKEN" \
+  -H "Content-Type: application/json" \
+  https://<your-worker>/memory/claims \
+  -d '{
+    "operation": "create",
+    "claim": {
+      "scope_kind": "user",
+      "scope_id": "user-123",
+      "type": "preference",
+      "subject": "response",
+      "memory_key": "response.language",
+      "value": "zh-CN",
+      "canonical_text": "用户偏好使用中文回复。",
+      "provenance": "user_explicit",
+      "confidence": 0.98,
+      "evidence_segment_ids": ["<已有segment-id>"]
+    }
+  }'
+```
 
-- `project_id` 最长 **32 字符**，超出的会在解析 `PROJECT_TOKENS_JSON` 时报配置错误
-- 自动派生的 segment id（`seg_<hash>` / `pe_<hash>`）会按剩余预算自动收窄摘要宽度，
-  最短保留 16 个十六进制字符；`project_id` 在 19 字符以内时摘要宽度与旧版完全一致，
-  因此不会改变既有数据的 id
-- 请求体显式传入的 `id` 无法自动收窄，拼接后超过 64 字节会返回 `400` 并说明实际字节数
-- 相同的业务 id 进入存储前也会被自动加上项目作用域，避免跨项目覆盖
+Claims 的 `create` 会先检查身份键，再在同一项目、scope、类型和 workspace 内做语义去重。
+相似事实会 reinforce；可能是更新或冲突的内容不会被静默覆盖。完整规则见
+[`docs/durable-memory-design.md`](docs/durable-memory-design.md)。
 
-## 代码结构（src）
+## 接口概览
 
-核心思路：按功能分层，避免 `src/index.ts` 变成 God file；其中 memory schema 默认导出名为 `defaultMemorySchema`，你可以替换为自己的 schema 以适配不同的存储字段/过滤逻辑。
+| 路径 | 用途 |
+| --- | --- |
+| `GET /health` | 检查服务是否可达 |
+| `POST /embed`、`POST /v1/embeddings` | 生成 embedding |
+| `POST /memory/index` | 写入原始记忆 |
+| `POST /memory/search` | 搜索原始记忆 |
+| `POST /memory/claims` | 创建或变更持久记忆 |
+| `GET /memory/claims` | 查看 Claims |
+| `POST /memory/context` | 获取当前有效记忆上下文 |
+| `POST /memory/profile/ingest` | 提交个人记忆提炼证据 |
+| `POST /memory/extraction/ingest` | 提交已索引证据进行自动提炼 |
+| `POST /web/extract` | 提取网页正文 |
+| `POST /web/search`、`POST /web/crawl` | 转发 Tavily 请求 |
+| `/admin` | Cloudflare Access 保护的管理后台 |
+
+所有接口的完整请求格式、限制和返回值见
+[`docs/complete-guide.md`](docs/complete-guide.md)。
+
+## 项目结构
 
 ```text
 src/
-  index.ts              # entry + route-level auth
-  auth.ts               # project token -> project scope
-  project.ts            # project id / namespace helpers
-  env.ts                # Env typings
-  utils.ts              # shared helpers
-
-  api/                  # HTTP layer (request/response)
-  ai/                   # Workers AI wrappers
-  db/                   # D1 access
-  vector/               # Vectorize access
-  web/                  # SSRF-guarded page fetching (Tavily relay + direct fallback)
-  memory/               # schema + index/search orchestration
+  index.ts       # 路由和全局鉴权
+  api/           # HTTP 接口
+  ai/            # Workers AI 调用
+  db/            # D1 数据访问
+  vector/        # Vectorize 数据访问
+  memory/        # 原始记忆和持久记忆逻辑
+migrations/      # D1 迁移
+docs/            # 配置、设计和完整参考
 ```
 
-## 数据模型（D1）
-
-表名：`memory_segments`（见 `cf-rag/migrations/0001_init.sql` 和 `cf-rag/migrations/0002_project_isolation.sql`）
-
-- `id`：项目作用域内唯一 id；若请求未提供，会基于 `project_id + session_id + tape + text` 派生稳定 id
-- `project_id`：项目隔离键
-- `text`：原文
-- `metadata_json`：原始元数据（完整 JSON，Worker 会补入 `project_id`）
-- `session_id` / `tape`：常用过滤列
-- `content_hash`：用于避免重复 embedding/写入
-- `created_at` / `updated_at`：毫秒时间戳
-- `expires_at`：raw segment 的 TTL 截止时间
-- `deletion_state`：`active` 或等待 vector 删除完成的 `pending_delete`
-
-## Retention 与删除
-
-Worker 每五分钟运行一次 Cron sweep。它会删除过期、且不再支撑 active claim 的 raw
-segments，并同步删除 `cf-vector` 中的同 ID vector。同一次 sweep 也会检查每个 project 的
-logical-byte 上限，超限时从最旧的可删除 segment 开始清理到目标水位。
-
-配额检查不再挂在 `/memory/index` 的写路径上：它需要扫描该 project 的全部活跃 segment
-（`SUM(LENGTH(...))` 加上逐行的 evidence join），放在写路径会随数据量线性拖慢写入。代价是
-配额执行最多滞后一个 Cron 周期（5 分钟）。
-
-删除通过 D1 `memory_deletion_jobs` outbox 执行：先将 segment 标记为不可检索，再删除
-Vectorize vector，最后删除 D1 row；待删除 claim 会立即 retract，避免其在重试期间继续注入上下文。
-Vectorize 暂时失败会保留 job 并由下一次 Cron sweep 自动重试。
-这只使用 Worker 的 D1/Vectorize bindings，不需要 Whisper 持有 Cloudflare 管理 API token。
-
-`POST /memory/forget` 提供项目内的 user 或 session scope 删除，业务调用方必须在自己的认证层
-验证该 scope 属于当前用户。Whisper Telegram 仅在 private chat 中公开 `/forget CONFIRM` 与
-`/forget_all CONFIRM`，并使用既有项目 token 调用此业务 API。
-
-## Shared profile extraction
-
-`POST /memory/profile/ingest` accepts bounded user evidence from the authenticated `personal`
-project only:
-
-```json
-{
-  "text": "I prefer concise replies.",
-  "source_app": "codex",
-  "external_session_id": "session-123"
-}
-```
-
-It buffers the evidence and returns `202` with
-`{"ok":true,"evidence_id":"...","buffered":true,"job_id":null}`. Ingest no longer creates one
-extraction job per message: extracting each message in isolation fragmented the context a
-preference is usually expressed across ("还是用 pytest 吧" only makes sense against the preceding
-turn), and cost three model calls per message. Evidence is instead batched — see
-[Evidence batching](#evidence-batching) below. `job_id` remains in the response as an explicit
-`null` so the payload shape stays stable for existing callers.
-
-The five-minute Cron claims and processes
-jobs using D1 leases, exponential backoff, and a bounded attempt count. Keeping the three external
-model calls out of the ingest request prevents a short request lifecycle from stranding a leased
-job. The extractor endpoint, key, model, and fixed personal owner ID are Worker-only bindings:
-
-```text
-PROFILE_EXTRACTOR_ENDPOINT   # or OPENROUTER_API_BASE as a fallback
-PROFILE_EXTRACTOR_API_KEY
-PROFILE_EXTRACTOR_MODEL
-PERSONAL_MEMORY_OWNER_ID
-```
-
-Requests carry `HTTP-Referer` (default `https://github.com/Andy963/cf-rag`) and
-`X-OpenRouter-Title` (default `cf-rag`). OpenRouter identifies an app by the referer URL and uses
-the title only as that app's display name, so both must be sent or the calls stay attributed to
-`unknown`; other OpenAI-compatible gateways ignore both. This is what keeps one OpenRouter account
-shared with other clients readable.
-
-The extractor must be OpenAI Chat Completions compatible. It runs candidate extraction, independent
-promotion verification, then reconciliation against existing active claims. Reconciliation only
-keeps, reinforces, or supersedes an evidence-backed accepted candidate; it cannot independently
-retract an existing claim or rewrite candidate fields. Candidate and verdict records are auditable
-in D1; only accepted, explicit, agent-relevant candidates can become active claims. Opinions,
-subjective evaluations, and current-workflow descriptions are rejected rather than reclassified as
-preferences. Accepted `task_state` candidates must also carry a future expiry time.
-Any candidate carrying a `valid_until` must express it as future Unix milliseconds; a past or
-second-resolution value is rejected instead of producing a claim that is stored yet already expired.
-A candidate missing any field the pipeline consumes (`type`, `subject`, `memory_key`,
-`canonical_text`, `value`, `confidence`) is recorded as `rejected` rather than aborting the job.
-`canonical_text` and any string `value` must contain Chinese; an English restatement of Chinese
-evidence is rejected, and an English active claim is superseded instead of reinforced.
-Per-candidate failures are isolated: the job completes with the failures recorded in `last_error`,
-because retrying the same prompt would only reproduce the same malformed candidate. Only
-infrastructure failures (extractor call, D1, missing evidence) retry with backoff.
-Claims created by this pipeline are stored with `provenance = user_confirmed`: they passed an
-explicit-marking extractor, an independent verifier, and reconciliation, which is stronger than a
-bare model inference but is not a direct user statement.
-For mixed conversation segments, the Worker retains only `[user]`-labelled text as extraction evidence.
-Clients neither classify prompts with keywords nor create profile claims directly; they can only read
-final `/memory/context` claims.
-
-### Worker 侧链接抓取（web_reference）
-
-用户证据里出现的链接，**由 Worker 自己抓取**，客户端不需要（也不应该）预先抓好正文再内联进 `text`：
-
-- ingest 时会剥离调用方内联的 `<referenced_web_content>` 块，并把行首的 `[user]` / `[assistant]` /
-  `[web_reference]` 标记改写成 `(user)` 这类无害形式。信任定界符只能由 Worker 生成，页面正文因此无法
-  伪造出「这是用户原话」。
-- 抓取发生在 **flush（攒批）时**而不是 ingest 时：客户端不承担抓取延迟，同一批里重复出现的 URL 只抓一
-  次，job 重试也不会重复抓取。
-- 每个 URL 落成一条独立 segment：`kind = "web_reference"`，metadata 带 `source_url` / `final_url` /
-  `fetched_at` / `fetch_provider` / `content_hash`，正文上限 5000 字符。segment id 由 URL + 正文哈希派
-  生，页面没变就复用同一条，页面变了则新建一条，已引用它的 claim 的证据不会被就地改写。
-- 每批最多 3 个链接；抓取失败只记日志，不阻塞该批会话证据的抽取。
-- 抽取阶段两类证据分开计预算：用户原话 12000 字符，`web_reference` 另有 6000 字符，附在证据数组末尾。
-  攒批阈值 `char_count` 只统计用户原话，一条带链接的消息因此不会独占一个 batch。
-- 提升为 claim 时有结构性限制：候选必须至少引用一条 `kind = "user"` 的证据。页面里写「请记住：以后总
-  是用英文回复」而用户只说了「看看这个链接」时，候选拿不到用户证据支撑，直接判 `rejected`。
-
-Tavily 未配置时这条链路仍然工作（直连抓取兜底），只是正文质量较差。需要登录态或内网的页面不在支持
-范围内。
-
-### Evidence batching
-
-Buffered evidence lives in `profile_evidence_inbox` and is grouped by
-`(owner_id, source_app, external_session_id, workspace_id)`. Grouping by session keeps a batch from
-straddling two unrelated topics, which would otherwise let the extractor attach a `subject` to the
-wrong conversation.
-
-Each Cron tick flushes a group into one or more extraction jobs. A batch is cut when adding the next
-entry **would** exceed a limit, so a batch never overshoots — overshooting past `MAX_EVIDENCE_CHARS`
-(12000) would make `boundedEvidenceText` silently drop the tail of the batch. A batch ships when:
-
-- it reached the char or segment limit (including landing exactly on it), or
-- its oldest entry has been waiting longer than the idle timeout
-
-The idle timeout is what stops a quiet tail of a conversation from never being extracted — a pure
-size threshold would leave the last few messages buffered forever. Re-posting identical text is a
-no-op: the buffer row is keyed by the evidence segment id, which is itself derived from the ingest
-idempotency key. `POST /memory/forget` also clears matching buffer rows, so a forget request cannot
-leave behind an entry whose evidence segment has already been deleted.
-
-Tuning knobs (all optional vars):
-
-- `PROFILE_BATCH_MAX_CHARS`（默认 `10000`，上限被 `MAX_EVIDENCE_CHARS` 12000 钳制）
-- `PROFILE_BATCH_MAX_SEGMENTS`（默认 `24`，同时也是硬上限）
-- `PROFILE_BATCH_IDLE_MS`（默认 `900000`，即 15 分钟）
-
-时效上界为一个 Cron 周期（5 分钟）加上尾批的空闲等待。需要在明确的会话结束点立即抽取时，改用
-`POST /memory/extraction/ingest` 显式控批。
-
-`POST /memory/extraction/ingest` lets a project client report already indexed evidence to the same
-Worker-owned extractor. It requires `evidence_segment_ids`, `source_app`, `external_session_id`,
-and `user_id`. Every referenced segment must belong to the authenticated project. This is the
-integration endpoint for services such as Whisper: they report evidence but never invoke an LLM or
-call `POST /memory/claims` for automated extraction.
-
-## Vectorize metadata / namespace
-
-写入 Vectorize 时：
-
-- namespace：固定为 `project:<project_id>`
-- metadata 会从 `metadata_json` 里投影出少量字段（如果存在）
-
-当前投影字段：
-
-- `project_id`（string）
-- `session_id`（string）
-- `tape`（string）
-- `kind`（string）
-- `chat_id`（number）
-- `user_id`（number）
-
-如果你还需要在 Vectorize 侧做 metadata filter，建议创建 metadata index（至少 `project_id` / `session_id` / `tape`）：
+## 日常维护
 
 ```bash
-npx wrangler vectorize create-metadata-index cf-vector --property-name project_id --type string
-npx wrangler vectorize create-metadata-index cf-vector --property-name session_id --type string
-npx wrangler vectorize create-metadata-index cf-vector --property-name tape --type string
+npm run typecheck
+npx wrangler d1 migrations list cf-text --remote
+npx wrangler vectorize list-metadata-index cf-claims
+npm run deploy
 ```
 
-没有 metadata index 时，带 `filter` 的向量查询召回会不足。此时 `/memory/search` 会补一次
-不带 filter 的查询，**按 id 合并**两次结果后再由 D1 侧统一做精确过滤——而不是丢弃第一次的
-命中。第一次查询返回的正是最可能通过过滤的那批向量，直接覆盖会让召回反而低于不回退。
-无论走哪条路径，D1 侧过滤都保证结果不会跨出 filter 与鉴权项目。
+Worker 每五分钟执行一次 Cron，用于处理个人记忆提炼任务和清理过期原始记忆。
+生产环境建议使用自定义域名，并将 `workers_dev = false`，尤其是启用管理后台时。
 
-## 调用示例
+## 升级
 
-Health：
+拉取新版本后先应用迁移，再部署：
 
 ```bash
-curl -sS -H "Authorization: Bearer $API_TOKEN" https://<your-worker>/health
+npx wrangler d1 migrations apply cf-text --remote
+npm run typecheck
+npm run deploy
 ```
 
-Embedding（OpenAI 兼容）：
-
-```bash
-curl -sS -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
-  https://<your-worker>/v1/embeddings \
-  -d '{"input":["hello","world"]}'
-```
-
-Memory health（使用项目 token）：
-
-```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" \
-  https://<your-worker>/memory/health
-```
-
-Index memory（Worker 会自动补入 `project_id`）：
-
-```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application/json" \
-  https://<your-worker>/memory/index \
-  -d '{"text":"hello world","metadata":{"session_id":"s1","tape":"t1","kind":"note"}}'
-```
-
-`items` 数组中任何一条格式不合法（`text` 非字符串、`id` 非字符串、`metadata` 非对象）都会
-返回 `400` 并指出具体下标，例如 `items[2].text must be a string`。此前这类条目会被静默丢弃，
-调用方会收到一个看起来成功、但少了几条的结果。
-
-Search memory：
-
-```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application/json" \
-  https://<your-worker>/memory/search \
-  -d '{"query":"hello","topK":5,"filter":{"session_id":"s1","tape":"t1"}}'
-```
-
-## Rerank（可选）
-
-`/memory/search` 默认只按 Vectorize 的向量相似度排序。
-
-如果你希望“召回 + 精排”，可以在请求体里打开 `rerank`，让 Worker 额外调用 Workers AI 的 reranker 模型对候选结果重排（会带来额外延迟与成本）：
-
-```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application/json" \
-  https://<your-worker>/memory/search \
-  -d '{"query":"hello","topK":5,"filter":{"session_id":"s1","tape":"t1"},"rerank":{"enabled":true,"topN":20}}'
-```
-
-当 rerank 启用时，返回的 match 会额外包含：
-
-- `vector_score`：向量相似度分数
-- `rerank_score`：reranker 分数
-- `score`：最终用于排序的分数（优先使用 `rerank_score`，否则回退到 `vector_score`）
-
-## 持久记忆（Claims）
-
-`memory_segments` 继续保存可追溯的原始证据。持久偏好、指令、决定、档案和任务状态保存在独立的
-`memory_claims` 表，并用 `memory_evidence` 链接到其源 segment。
-
-详细的数据模型、变更规则和后续阶段见
-[`docs/durable-memory-design.md`](docs/durable-memory-design.md)。
-
-`POST /memory/claims` 只接受受限操作：
-
-- `create`：创建新 claim。`model_inferred` 来源会以 `proposed` 状态保存，不能成为注入上下文的长期记忆。
-- `reinforce`：为现有 active claim 增加证据，并可提高置信度。
-- `supersede`：创建替代 claim，将同一 canonical key 的旧 active claim 标记为 `superseded`。
-- `retract`：将指定 active claim 标记为 `retracted`。
-
-除上述身份键查重外，`create` 还会做一层语义去重：无身份匹配时，用新 claim 的
-`canonical_text` 在 `cf-claims` 向量索引中使用精确 cosine 分数召回同 scope、同 type 的候选。
-必须预先为 `status`、`scope_kind`、`scope_id`、`type`、`workspace_id` 建立 metadata index，
-这样过滤会在 topK 截断前执行。相似度 ≥
-`CLAIM_DEDUP_SAME_SCORE`（默认 `0.92`）视为同义事实，自动转为 reinforce；低于
-`CLAIM_DEDUP_REVIEW_MIN_SCORE`（默认 `0.75`）视为新事实直接插入；之间的灰区交给配置的
-LLM（Profile Extractor 端点）三选一裁决：`same` 转 reinforce、`update` 按
-`CLAIM_DEDUP_AUTO_REPLACE` 决定是否自动替换（默认关闭，报错提示改用 supersede）、`conflict`
-拒绝写入并提示走显式操作。LLM 不可用时灰区降级为直接插入，宁可暂存可能重复的 claim，也不静默合并。
-`PROFILE_EXTRACTOR_PROTOCOL=responses` 时灰区裁决使用 Responses API；并发写入按 project/scope/type/workspace
-加 D1 lease 锁，避免多个请求同时通过语义检查。Vectorize 写入存在延迟可见窗口时，Worker
-会从同一语义 scope 的 D1 active claims 取回未出现在向量结果中的候选，重新嵌入后参与 cosine 比较。
-
-显式用户来源的 claim 必须提供同项目中已有的 `evidence_segment_ids`。例如：
-
-```json
-{
-  "operation": "create",
-  "claim": {
-    "scope_kind": "user",
-    "scope_id": "user-123",
-    "type": "preference",
-    "subject": "response",
-    "memory_key": "response.language",
-    "value": "zh-CN",
-    "canonical_text": "用户偏好使用中文回复。",
-    "provenance": "user_explicit",
-    "confidence": 0.98,
-    "evidence_segment_ids": ["project:proj-a:seg_abc"]
-  }
-}
-```
-
-`POST /memory/context` 按用户、项目和会话 scope 返回当前有效的 active claims，并包含 source
-segment ids。若传入 `query`，Worker 会把固定 scope 内存与专用 claim 向量索引的语义命中合并。
-它用于 Agent 每轮开始前加载受限、结构化的记忆上下文：
-
-```json
-{
-  "user_id": "user-123",
-  "session_id": "session-456",
-  "query": "当前回复应该使用什么语言？",
-  "types": ["preference", "instruction"],
-  "limit": 20
-}
-```
-
-`GET /memory/claims` 用于审计和管理当前提炼出的记忆。它仍受项目 token 保护，可按
-`scope_kind`、`scope_id`、`status` 和 `limit` 过滤：
-
-```text
-GET /memory/claims?scope_kind=user&scope_id=user-123&status=active&limit=100
-```
-
-## 升级注意事项
-
-如果你是从旧版 `cf-rag` 升级：
-
-1. 先执行 `npx wrangler d1 migrations apply cf-text --remote`，把 `project_id` 列和索引补上
-2. 再配置 `PROJECT_TOKENS_JSON` secret
-3. 旧数据如果之前没有 `project_id` 或仍在 Vectorize 默认 namespace，需要按项目重新走一次 `/memory/index`，把向量写入新的 `project:<project_id>` namespace
-
-也就是说，这次升级会把 memory 从“共享池”切到“项目级命名空间”；只有完成 reindex 的项目，才能在新隔离模型下被 `/memory/search` 查到。
-
-迁移 `0009_segment_user_id_index.sql` 为 `POST /memory/forget` 的 user scope 删除补上了
-metadata `user_id` 表达式索引。它是纯索引变更，不改数据，但在大项目上是该接口能否在超时前
-完成的关键。索引表达式必须与查询里的 `CAST(json_extract(metadata_json, '$.user_id') AS TEXT)`
-逐字一致，SQLite 才会命中它。这里的 `CAST` 不能省略：`json_extract` 返回 JSON 原生类型，而
-`user_id` 按约定是 number，去掉 `CAST` 会让它与绑定的 TEXT 参数永远不相等，从而静默漏删。
-
-迁移 `0010_profile_evidence_inbox.sql` 新增 evidence 攒批缓冲表。它只新增表，不改动既有数据。
-应用后 `POST /memory/profile/ingest` 的响应从 `{ok, job_id}` 变为
-`{ok, evidence_id, buffered, job_id: null}`——调用方若依赖 `job_id` 立即拿到 job，需要改为
-通过 `GET /memory/claims` 观察最终结果。迁移前已排队的 `profile_extraction_jobs` 不受影响，
-仍会被 Cron 正常消费。
+旧版本如果没有按项目 namespace 写入 Vectorize，需要按照
+[`docs/complete-guide.md`](docs/complete-guide.md) 的升级说明重新索引。
