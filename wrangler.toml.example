@@ -52,13 +52,14 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # PERSONAL_MEMORY_PROJECT_ID = "personal"
 # PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
 # TAVILY_BASE_URL = "https://tavily.example.com"
-# Claim semantic deduplication. The claim metadata indexes should be created
-# before using filtered semantic deduplication.
-CLAIM_DEDUP_SAME_SCORE = "0.92"
-CLAIM_DEDUP_REVIEW_MIN_SCORE = "0.75"
-CLAIM_DEDUP_TOP_K = "12"
-CLAIM_DEDUP_LLM_ENABLED = "true"
-CLAIM_DEDUP_AUTO_REPLACE = "false"
+# Claim semantic deduplication (optional): the claims metadata indexes should
+# exist before enabling filtered semantic dedup. All values below are the
+# built-in defaults, so you only need to override what you want to change.
+# CLAIM_DEDUP_SAME_SCORE = "0.92"
+# CLAIM_DEDUP_REVIEW_MIN_SCORE = "0.75"
+# CLAIM_DEDUP_TOP_K = "12"
+# CLAIM_DEDUP_LLM_ENABLED = "true"
+# CLAIM_DEDUP_AUTO_REPLACE = "false"
 # /memory/* requires a PROJECT_TOKENS_JSON secret such as:
 # {"proj-a":"token-for-a","proj-b":"token-for-b"}
 # Profile extractor also needs secrets:
