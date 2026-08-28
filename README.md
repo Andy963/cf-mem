@@ -181,6 +181,9 @@ Claims 的 `create` 会先检查身份键，再在同一项目、scope、类型�
 | `POST /web/search`、`POST /web/crawl` | 转发 Tavily 请求 |
 | `/admin` | Cloudflare Access 保护的管理后台 |
 
+`POST /memory/context` 对空输入、斜杠命令和短确认词会跳过语义 embedding 与 Vectorize 查询，
+但仍会返回按 scope 确定性匹配的 Claims。
+
 所有接口的完整请求格式、限制和返回值见
 [`docs/complete-guide.md`](docs/complete-guide.md)。
 

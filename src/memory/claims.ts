@@ -199,8 +199,8 @@ export function normalizeClaimMutationRequest(body: unknown, projectScope: Proje
 // or punctuation, so words that merely START with a trivial word ("okhttp",
 // "notes") do NOT match, while trailing-punctuation variants ("hi!", "好。") do.
 const TRIVIAL_PROMPT_RE = new RegExp(
-  "^(是|对|好|嗯|哦|行|可以|不用|没有|谢谢|多谢|辛苦|继续|"
-  + "yes|no|ok|okay|sure|thanks|thank you|y|n|yep|nope|yeah|nah|hi|hey|hello|yo|sup|"
+  "^(好的|好哒|好嘞|收到|明白|知道了|没问题|可以的|行的|是|对|好|嗯嗯|嗯|哦|行|可以|不用|没有|谢谢|多谢|辛苦|继续|成|"
+  + "yes|no|ok|okay|sure|thanks|thank you|thx|ty|pls|np|y|n|yep|nope|yeah|nah|hi|hey|hello|yo|sup|"
   + "continue|go ahead|proceed|do it|got it|cool|nice|great|done|next|lgtm|k)"
   + "[\\s!?.:;,，。！？、'\"~（）()\\[\\]{}<>*&^%$#@!+=`\\u00a0]*$",
   "i",
