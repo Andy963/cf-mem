@@ -26,10 +26,50 @@ import {
 } from "./claims";
 import { searchClaimMatches, syncClaimVector } from "./claim-index";
 import { readDedupConfig, resolveSemanticDuplicate, withClaimDedupLock } from "./claim-dedup";
+import { chunkArray } from "../utils";
 
 function newClaimId(): string {
   // UUIDs are globally unique while remaining within Vectorize's 64-byte ID limit.
   return `claim_${crypto.randomUUID()}`;
+}
+
+// Usage feedback: last usage timestamp recorded per claim id within this
+// isolate's lifetime. Workers are ephemeral, so this is a soft dedup — it
+// collapses bursts within a minute but a cold isolate records again. That is
+// the right trade-off: exact counting is not needed, only the ability to tell
+// “never used” from “used recently”, and collapsing bursts keeps the write
+// volume proportional to distinct turns rather than every chunk injection.
+const USAGE_RECORD_DEDUP_MS = 60_000;
+const lastUsageRecordedAt = new Map<string, number>();
+
+/**
+ * Records that the given claims were just injected into an agent turn.
+ * Fire-and-forget: callers should not await side-effects of building a
+ * response. Errors are swallowed — usage stats must never break recall.
+ */
+export function recordClaimUsage(env: Env, claimIds: string[]): void {
+  if (claimIds.length === 0) return;
+  const now = Date.now();
+  const fresh = claimIds.filter((id) => {
+    const last = lastUsageRecordedAt.get(id);
+    if (last !== undefined && now - last < USAGE_RECORD_DEDUP_MS) return false;
+    lastUsageRecordedAt.set(id, now);
+    return true;
+  });
+  // Keep the soft-dedup map bounded; entries older than the dedup window are
+  // dead weight once their row is written.
+  if (lastUsageRecordedAt.size > 1_000) {
+    for (const [id, ts] of lastUsageRecordedAt) {
+      if (now - ts >= USAGE_RECORD_DEDUP_MS) lastUsageRecordedAt.delete(id);
+    }
+  }
+  if (fresh.length === 0) return;
+  for (const chunk of chunkArray(fresh, 50)) {
+    const placeholders = chunk.map(() => "?").join(",");
+    env.DB.prepare(
+      `UPDATE memory_claims SET use_count = use_count + 1, last_used_at = ? WHERE id IN (${placeholders})`,
+    ).bind(now, ...chunk).run().catch(() => {});
+  }
 }
 
 function parseValue(row: StoredClaimRow): unknown {
@@ -59,6 +99,8 @@ function toClaimResponse(row: StoredClaimRow, evidence: Array<{ segmentId: strin
     superseded_by: row.superseded_by,
     applicability: row.applicability,
     workspace_id: row.workspace_id,
+    use_count: row.use_count ?? 0,
+    last_used_at: row.last_used_at ?? null,
     evidence: evidence.map(({ segmentId, relation }) => ({ segment_id: segmentId, relation })),
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -285,6 +327,9 @@ export async function loadMemoryContext(
     })
     .slice(0, request.limit);
   const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, claims.map((claim) => claim.id));
+  // Usage feedback: these claims are about to be injected into an agent turn.
+  // Fire-and-forget so usage stats can never delay or break recall.
+  recordClaimUsage(env, claims.map((claim) => claim.id));
   return {
     project_id: projectScope.projectId,
     claims: claims.map((claim) => ({

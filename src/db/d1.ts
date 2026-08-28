@@ -27,6 +27,8 @@ export interface StoredClaimRow extends Record<string, unknown> {
   superseded_by: string | null;
   applicability: ClaimApplicability;
   workspace_id: string | null;
+  use_count: number;
+  last_used_at: number | null;
   created_at: number;
   updated_at: number;
 }

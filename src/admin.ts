@@ -47,6 +47,8 @@ interface AdminClaimRow {
   confidence: number;
   applicability: string;
   workspace_id: string | null;
+  use_count: number;
+  last_used_at: number | null;
   created_at: number;
   updated_at: number;
   sources: string;
@@ -352,7 +354,7 @@ async function listAdminClaims(env: Env, filters: ClaimListFilters): Promise<{ p
   const [count, claims] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM memory_claims WHERE ${where}`).bind(...bindings).first<{ total: number }>(),
     env.DB.prepare(
-      `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, created_at, updated_at,
+      `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, use_count, last_used_at, created_at, updated_at,
        COALESCE((SELECT GROUP_CONCAT(DISTINCT json_extract(s.metadata_json, '$.source_app')) FROM memory_evidence AS e JOIN memory_segments AS s ON s.id = e.segment_id AND s.project_id = e.project_id WHERE e.claim_id = memory_claims.id AND json_extract(s.metadata_json, '$.source_app') IS NOT NULL), '') AS sources,
        COALESCE((SELECT GROUP_CONCAT(tag) FROM memory_claim_tags WHERE claim_id = memory_claims.id), '') AS tags
        FROM memory_claims
@@ -366,7 +368,7 @@ async function listAdminClaims(env: Env, filters: ClaimListFilters): Promise<{ p
 
 async function getAdminClaimDetail(env: Env, claimId: string): Promise<{ claim: AdminClaimRow; evidence: ClaimEvidenceRow[]; tags: string[]; audit: ClaimAuditRow[] } | null> {
   const claim = await env.DB.prepare(
-    `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, created_at, updated_at,
+    `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, use_count, last_used_at, created_at, updated_at,
      COALESCE((SELECT GROUP_CONCAT(DISTINCT json_extract(s.metadata_json, '$.source_app')) FROM memory_evidence AS e JOIN memory_segments AS s ON s.id = e.segment_id AND s.project_id = e.project_id WHERE e.claim_id = memory_claims.id AND json_extract(s.metadata_json, '$.source_app') IS NOT NULL), '') AS sources,
      COALESCE((SELECT GROUP_CONCAT(tag) FROM memory_claim_tags WHERE claim_id = memory_claims.id), '') AS tags
      FROM memory_claims WHERE id = ?`,
@@ -646,7 +648,7 @@ const DASHBOARD_HTML = `<!doctype html>
         <select id="claim-type" aria-label="Filter by type"><option value="">All types</option><option value="preference">Preference</option><option value="instruction">Instruction</option><option value="decision">Decision</option><option value="profile">Profile</option><option value="task_state">Task state</option></select>
         <button type="submit">Filter</button>
       </form>
-      <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Type / scope</th><th>Status</th><th>Confidence</th><th>Updated</th><th>Operations</th></tr></thead><tbody id="claim-rows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Type / scope</th><th>Status</th><th>Confidence</th><th>Used</th><th>Updated</th><th>Operations</th></tr></thead><tbody id="claim-rows"></tbody></table></div>
       <div class="pager"><span id="page-label">—</span><div><button type="button" id="previous-page">Previous</button><button type="button" id="next-page">Next</button></div></div>
     </section>
     <section class="table-card" id="prompt-section" aria-labelledby="prompt-title">
@@ -766,6 +768,7 @@ const DASHBOARD_HTML = `<!doctype html>
           const typeCell = createCell(claim.type + " · " + claim.scope_kind); typeCell.append(document.createElement("br"), labels(splitLabels(claim.sources), "source")); row.append(typeCell);
           const statusCell = document.createElement("td"); statusCell.append(badge(claim.status)); row.append(statusCell);
           row.append(createCell((claim.confidence * 100).toFixed(0) + "%"));
+          row.append(createCell(String(claim.use_count ?? 0) + (claim.last_used_at ? " · " + formatDate(claim.last_used_at) : " · never")));
           row.append(createCell(formatDate(claim.updated_at)));
           const opCell = document.createElement("td"); opCell.className = "claim-ops";
           const editBtn = document.createElement("button"); editBtn.type = "button"; editBtn.className = "op-button"; editBtn.textContent = "edit";
@@ -798,7 +801,7 @@ const DASHBOARD_HTML = `<!doctype html>
         try { value = JSON.stringify(JSON.parse(value), null, 2); } catch {}
         detail.replaceChildren();
         const metadata = document.createElement("dl"); metadata.className = "detail-grid";
-        for (const [label, value] of [["Project", claim.project_id], ["Scope", claim.scope_kind + " · " + claim.scope_id], ["Type", claim.type], ["Status", claim.status], ["Confidence", (claim.confidence * 100).toFixed(0) + "%"], ["Provenance", claim.provenance], ["Applicability", claim.applicability], ["Updated", formatDate(claim.updated_at)]]) {
+        for (const [label, value] of [["Project", claim.project_id], ["Scope", claim.scope_kind + " · " + claim.scope_id], ["Type", claim.type], ["Status", claim.status], ["Confidence", (claim.confidence * 100).toFixed(0) + "%"], ["Provenance", claim.provenance], ["Applicability", claim.applicability], ["Used", String(claim.use_count ?? 0) + (claim.last_used_at ? " · " + formatDate(claim.last_used_at) : " · never")], ["Updated", formatDate(claim.updated_at)]]) {
           const term = document.createElement("dt"); term.textContent = label;
           const description = document.createElement("dd"); description.textContent = value;
           metadata.append(term, description);
