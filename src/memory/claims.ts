@@ -191,6 +191,34 @@ export function normalizeClaimMutationRequest(body: unknown, projectScope: Proje
   throw new ClaimSchemaError("operation must be one of: create, reinforce, supersede, retract");
 }
 
+// Prompts that carry no semantic signal — trivial acknowledgements, greetings,
+// slash commands, empty input. Ported from Hermes Agent's TRIVIAL_PROMPT_RE:
+// used to skip semantic recall on turns that carry no signal, saving an
+// embedding round-trip and preventing stale context from derailing one-word
+// replies. The alternation is anchored and may only be followed by whitespace
+// or punctuation, so words that merely START with a trivial word ("okhttp",
+// "notes") do NOT match, while trailing-punctuation variants ("hi!", "好。") do.
+const TRIVIAL_PROMPT_RE = new RegExp(
+  "^(是|对|好|嗯|哦|行|可以|不用|没有|谢谢|多谢|辛苦|继续|"
+  + "yes|no|ok|okay|sure|thanks|thank you|y|n|yep|nope|yeah|nah|hi|hey|hello|yo|sup|"
+  + "continue|go ahead|proceed|do it|got it|cool|nice|great|done|next|lgtm|k)"
+  + "[\\s!?.:;,，。！？、'\"~（）()\\[\\]{}<>*&^%$#@!+=`\\u00a0]*$",
+  "i",
+);
+
+// Returns true when the query is too trivial to warrant semantic recall:
+// empty, a slash command, or a bare greeting/acknowledgement. Callers use this
+// to skip the Vectorize query path entirely — deterministic claims (scope-
+// matched instructions/preferences) still load; only the semantic search and
+// its embedding call are skipped.
+export function isTrivialPrompt(text: string | null | undefined): boolean {
+  if (!text) return true;
+  const stripped = text.trim();
+  if (!stripped) return true;
+  if (stripped.startsWith("/")) return true;
+  return TRIVIAL_PROMPT_RE.test(stripped);
+}
+
 export function normalizeContextRequest(body: unknown): ContextRequest {
   if (body === undefined || body === null) {
     return { userId: null, sessionId: null, query: null, types: null, limit: 20, workspaceId: null, profileOnly: false };
