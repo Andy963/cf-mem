@@ -7,6 +7,7 @@ const DELETE_BATCH_SIZE = 100;
 const DEFAULT_RETENTION_DAYS = 90;
 const DEFAULT_MAX_BYTES_PER_PROJECT = 100 * 1024 * 1024;
 const DEFAULT_TARGET_BYTES_PER_PROJECT = 80 * 1024 * 1024;
+const DEFAULT_PROPOSED_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 type ResourceType = "segment" | "claim";
 type DeletionReason = "expired" | "quota" | "user_forget";
@@ -290,8 +291,31 @@ export async function runRetentionSweep(env: Env): Promise<{ queued: number; del
   const projects = await env.DB.prepare("SELECT DISTINCT project_id FROM memory_segments WHERE deletion_state = 'active'").all<{ project_id: string }>();
   let quota = 0;
   for (const project of projects.results) quota += await queueQuotaSegments(env, project.project_id, now);
+  const proposed = await queueStaleProposedClaims(env, now);
   const processed = await processDeletionJobs(env);
-  return { queued: expired + quota, ...processed };
+  return { queued: expired + quota + proposed, ...processed };
+}
+
+/**
+ * Never-used proposed claims accumulate forever: they are excluded from
+ * /memory/context (which returns active claims only) and, unlike active
+ * claims, they have no supersede/retract lifecycle driving them to a terminal
+ * state. A proposed claim that was extracted but never user-confirmed within
+ * 30 days, and that recall never surfaced (use_count = 0), is noise — queue
+ * it for the standard deletion pipeline, which also cleans its evidence rows
+ * and vector.
+ */
+async function queueStaleProposedClaims(env: Env, now: number): Promise<number> {
+  const staleBefore = now - DEFAULT_PROPOSED_MAX_AGE_MS;
+  const stale = await env.DB.prepare(
+    "SELECT id, project_id FROM memory_claims WHERE status = 'proposed' AND use_count = 0 AND created_at <= ?",
+  ).bind(staleBefore).all<{ id: string; project_id: string }>();
+  return await queueDeletionJobs(
+    env.DB,
+    stale.results.map((row) => ({ projectId: row.project_id, resourceType: "claim" as const, resourceId: row.id })),
+    "expired",
+    now,
+  );
 }
 
 export async function forgetScopedMemory(
