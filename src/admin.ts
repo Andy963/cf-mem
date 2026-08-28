@@ -536,7 +536,7 @@ const DASHBOARD_HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>cf-rag · Admin</title>
+  <title>cf-mem · Admin</title>
   <style>
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #10141b; color: #edf3fa; }
     * { box-sizing: border-box; }
@@ -623,7 +623,7 @@ const DASHBOARD_HTML = `<!doctype html>
 <body>
   <main>
     <header>
-      <div><div class="eyebrow">Cloudflare Worker</div><h1>cf-rag admin</h1><div class="updated" id="updated">Loading overview…</div></div>
+      <div><div class="eyebrow">Cloudflare Worker</div><h1>cf-mem admin</h1><div class="updated" id="updated">Loading overview…</div></div>
       <button type="button" id="refresh">Refresh</button>
     </header>
     <p id="error" role="alert"></p>

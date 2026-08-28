@@ -1,4 +1,4 @@
-# cf-rag
+# cf-mem
 
 一个部署在 Cloudflare Workers 上的 RAG 与持久记忆后端。
 

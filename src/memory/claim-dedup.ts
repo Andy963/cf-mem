@@ -21,8 +21,8 @@ const DEFAULT_SAME_SCORE = 0.92;
 const DEFAULT_REVIEW_MIN_SCORE = 0.75;
 const DEFAULT_TOP_K = 12;
 
-const DEFAULT_DEDUP_APP_TITLE = "cf-rag";
-const DEFAULT_DEDUP_APP_URL = "https://github.com/Andy963/cf-rag";
+const DEFAULT_DEDUP_APP_TITLE = "cf-mem";
+const DEFAULT_DEDUP_APP_URL = "https://github.com/Andy963/cf-mem";
 const DEDUP_LLM_TIMEOUT_MS = 15_000;
 const DEDUP_LOCK_TTL_MS = 120_000;
 const DEDUP_LOCK_WAIT_MS = 30_000;

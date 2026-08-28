@@ -2,9 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOOK_TEMPLATE="${SCRIPT_DIR}/cf_rag_hook.py"
+HOOK_TEMPLATE="${SCRIPT_DIR}/cf_mem_hook.py"
 
-CONFIG_DIR="${HOME}/.config/cf-rag"
+CONFIG_DIR="${HOME}/.config/cf-mem"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 LEGACY_CONFIG_FILE="${HOME}/.config/whisper-profile-memory/config.json"
 
@@ -20,8 +20,8 @@ Usage:
 
 Options:
   --cli <name>        Target CLI to install hooks for (codex, droid, claude, all)
-  --base-url <url>    Base URL of cf-rag service (e.g. https://emb.zhougao.win/memory)
-  --token <token>     Bearer token for cf-rag authentication
+  --base-url <url>    Base URL of cf-mem service (e.g. https://emb.zhougao.win/memory)
+  --token <token>     Bearer token for cf-mem authentication
   --owner-id <id>     Owner/user identifier
   -h, --help          Show this help message
 
@@ -101,8 +101,8 @@ PY
   elif [[ -f "${SCRIPT_DIR}/config.example.json" ]]; then
     echo "Error: Config file not found at $CONFIG_FILE." >&2
     echo "Please create it by copying ${SCRIPT_DIR}/config.example.json:" >&2
-    echo "  mkdir -p ~/.config/cf-rag" >&2
-    echo "  cp ${SCRIPT_DIR}/config.example.json ~/.config/cf-rag/config.json" >&2
+    echo "  mkdir -p ~/.config/cf-mem" >&2
+    echo "  cp ${SCRIPT_DIR}/config.example.json ~/.config/cf-mem/config.json" >&2
     echo "Or pass --base-url, --token, and --owner-id to this script." >&2
     exit 1
   else
@@ -113,7 +113,7 @@ PY
 
 install_codex() {
   local target_dir="${HOME}/.codex/hooks"
-  local target_script="${target_dir}/cf_rag_hook.py"
+  local target_script="${target_dir}/cf_mem_hook.py"
   local config_path="${HOME}/.codex/hooks.json"
 
   mkdir -p "$target_dir"
@@ -155,7 +155,7 @@ def filter_hooks(groups):
             continue
         cleaned = [
             h for h in sub
-            if isinstance(h, dict) and "cf_rag_hook.py" not in str(h.get("command", "")) and "app.profile_memory.cli" not in str(h.get("command", ""))
+            if isinstance(h, dict) and "cf_mem_hook.py" not in str(h.get("command", "")) and "app.profile_memory.cli" not in str(h.get("command", ""))
         ]
         if cleaned:
             res.append({**g, "hooks": cleaned})
@@ -198,7 +198,7 @@ PY
 
 install_droid() {
   local target_dir="${HOME}/.factory/hooks"
-  local target_script="${target_dir}/cf_rag_hook.py"
+  local target_script="${target_dir}/cf_mem_hook.py"
   local config_path="${HOME}/.factory/hooks.json"
 
   mkdir -p "$target_dir"
@@ -235,7 +235,7 @@ def filter_hooks(groups):
             continue
         cleaned = [
             h for h in sub
-            if isinstance(h, dict) and "cf_rag_hook.py" not in str(h.get("command", "")) and "app.profile_memory.cli" not in str(h.get("command", ""))
+            if isinstance(h, dict) and "cf_mem_hook.py" not in str(h.get("command", "")) and "app.profile_memory.cli" not in str(h.get("command", ""))
         ]
         if cleaned:
             res.append({**g, "hooks": cleaned})
@@ -277,7 +277,7 @@ PY
 
 install_claude() {
   local target_dir="${HOME}/.claude/hooks"
-  local target_script="${target_dir}/cf_rag_hook.py"
+  local target_script="${target_dir}/cf_mem_hook.py"
   local config_path="${HOME}/.claude/settings.json"
 
   mkdir -p "$target_dir"
@@ -319,7 +319,7 @@ def filter_hooks(groups):
             continue
         cleaned = [
             h for h in sub
-            if isinstance(h, dict) and "cf_rag_hook.py" not in str(h.get("command", "")) and "app.profile_memory.cli" not in str(h.get("command", ""))
+            if isinstance(h, dict) and "cf_mem_hook.py" not in str(h.get("command", "")) and "app.profile_memory.cli" not in str(h.get("command", ""))
         ]
         if cleaned:
             res.append({**g, "hooks": cleaned})
@@ -383,4 +383,4 @@ case "$TARGET_CLI" in
     ;;
 esac
 
-echo "Done! cf-rag hooks successfully installed for $TARGET_CLI."
+echo "Done! cf-mem hooks successfully installed for $TARGET_CLI."
