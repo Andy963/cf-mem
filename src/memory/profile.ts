@@ -1139,6 +1139,16 @@ export async function createExtractionJob(
   return job.id;
 }
 
+async function markSegmentsExtracted(env: Env, projectId: string, segmentIds: string[], now: number): Promise<void> {
+  const uniqueIds = [...new Set(segmentIds)];
+  for (const idChunk of chunkArray(uniqueIds, INBOX_DELETE_CHUNK_SIZE)) {
+    const placeholders = idChunk.map(() => "?").join(",");
+    await env.DB.prepare(
+      `UPDATE memory_segments SET extracted_at = COALESCE(extracted_at, ?) WHERE project_id = ? AND deletion_state = 'active' AND id IN (${placeholders})`,
+    ).bind(now, projectId, ...idChunk).run();
+  }
+}
+
 export async function enqueueEvidenceExtraction(env: Env, scope: ProjectScope, body: unknown): Promise<{ jobId: string }> {
   const input = parseEvidenceIngestInput(body);
   const evidence = await fetchByIds(env.DB, scope.projectId, input.evidenceSegmentIds);
@@ -1152,6 +1162,7 @@ export async function enqueueEvidenceExtraction(env: Env, scope: ProjectScope, b
     externalSessionId: input.externalSessionId,
     workspaceId: input.workspaceId,
   });
+  await markSegmentsExtracted(env, scope.projectId, input.evidenceSegmentIds, Date.now());
   return { jobId };
 }
 
@@ -1353,6 +1364,7 @@ async function flushEvidenceGroup(
       externalSessionId: head.external_session_id,
       workspaceId: head.workspace_id,
     });
+    await markSegmentsExtracted(env, projectId, batch.map((row) => row.id), now);
     for (const idChunk of chunkArray(batch.map((row) => row.id), INBOX_DELETE_CHUNK_SIZE)) {
       const placeholders = idChunk.map(() => "?").join(",");
       await env.DB
