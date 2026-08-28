@@ -31,14 +31,20 @@ interface BreakerRow {
 }
 
 async function readBreakerState(db: D1Database): Promise<BreakerRow> {
-  const row = await db.prepare(
-    "SELECT consecutive_failures, open_until_at, last_error FROM llm_breaker_state WHERE id = 1",
-  ).first<BreakerRow>();
-  return {
-    consecutive_failures: row?.consecutive_failures ?? 0,
-    open_until_at: row?.open_until_at ?? null,
-    last_error: row?.last_error ?? null,
-  };
+  try {
+    const row = await db.prepare(
+      "SELECT consecutive_failures, open_until_at, last_error FROM llm_breaker_state WHERE id = 1",
+    ).first<BreakerRow>();
+    return {
+      consecutive_failures: row?.consecutive_failures ?? 0,
+      open_until_at: row?.open_until_at ?? null,
+      last_error: row?.last_error ?? null,
+    };
+  } catch {
+    // A missing or temporarily unavailable state table must not block the
+    // underlying LLM request. Treat the breaker as closed until D1 recovers.
+    return { consecutive_failures: 0, open_until_at: null, last_error: null };
+  }
 }
 
 export async function getBreakerOpenUntilAt(env: Env): Promise<number | null> {
