@@ -215,6 +215,7 @@ Nudge 会将没有角色标记的 `kind: "user"` 原始文本作为用户证据�
 显式 extraction ingest 和 profile ingest flush 在成功入队后也会标记相关 Segment，避免 Nudge 重复拾取。
 当提炼端点连续失败触发断路器时，Cron 会暂停提炼；排队任务会延后到冷却结束，
 不会因此增加 Job 或原始段落的失败计数。
+语义去重灰区中的 LLM 裁决也使用同一个断路器，上游故障时会快速跳过裁决并保留未合并 Claim。
 生产环境建议使用自定义域名，并将 `workers_dev = false`，尤其是启用管理后台时。
 
 ## 升级

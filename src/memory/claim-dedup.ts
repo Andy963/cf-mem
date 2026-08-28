@@ -8,6 +8,7 @@ import type { ProjectScope } from "../project";
 import { readBoolEnv } from "../utils";
 import { findVectorizedClaimMatches } from "./claim-index";
 import { type ClaimInput, ClaimSchemaError } from "./claims";
+import { withBreaker } from "./llm-breaker";
 
 // Deterministic identity keys (see fetchActiveClaimByIdentity) only catch claims
 // written with byte-identical subject/memory_key/value/canonical_text. Extraction
@@ -236,54 +237,56 @@ export async function judgeClaimPair(
     `- value: ${JSON.stringify(incoming.value) ?? "null"}`,
   ].join("\n");
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), DEDUP_LLM_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${env.PROFILE_EXTRACTOR_API_KEY?.trim() ?? ""}`,
-        "HTTP-Referer": env.PROFILE_EXTRACTOR_APP_URL?.trim() || DEFAULT_DEDUP_APP_URL,
-        "X-OpenRouter-Title": env.PROFILE_EXTRACTOR_APP_TITLE?.trim() || DEFAULT_DEDUP_APP_TITLE,
-      },
-      body: JSON.stringify(
-        protocol === "responses"
-          ? {
-            model: env.PROFILE_EXTRACTOR_MODEL?.trim(),
-            instructions: systemPrompt,
-            input: `${input}\n\nReturn JSON only.`,
-            text: { format: { type: "json_object" } },
-            max_output_tokens: 200,
-          }
-          : {
-            model: env.PROFILE_EXTRACTOR_MODEL?.trim(),
-            temperature: 0,
-            max_tokens: 200,
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: input },
-            ],
-          },
-      ),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const errText = await response.text().catch(() => "");
-      throw new Error(`claim_dedup_llm_http_${response.status}:${errText.slice(0, 300)}`);
+  return withBreaker(env, async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DEDUP_LLM_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${env.PROFILE_EXTRACTOR_API_KEY?.trim() ?? ""}`,
+          "HTTP-Referer": env.PROFILE_EXTRACTOR_APP_URL?.trim() || DEFAULT_DEDUP_APP_URL,
+          "X-OpenRouter-Title": env.PROFILE_EXTRACTOR_APP_TITLE?.trim() || DEFAULT_DEDUP_APP_TITLE,
+        },
+        body: JSON.stringify(
+          protocol === "responses"
+            ? {
+              model: env.PROFILE_EXTRACTOR_MODEL?.trim(),
+              instructions: systemPrompt,
+              input: `${input}\n\nReturn JSON only.`,
+              text: { format: { type: "json_object" } },
+              max_output_tokens: 200,
+            }
+            : {
+              model: env.PROFILE_EXTRACTOR_MODEL?.trim(),
+              temperature: 0,
+              max_tokens: 200,
+              messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: input },
+              ],
+            },
+        ),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        throw new Error(`claim_dedup_llm_http_${response.status}:${errText.slice(0, 300)}`);
+      }
+      const payload = await response.json() as {
+        choices?: Array<{ message?: { content?: unknown } }>;
+        output?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>;
+      };
+      const content = protocol === "responses"
+        ? payload.output?.flatMap((item) => item.content ?? [])
+          .find((item) => item.type === "output_text")?.text
+        : payload.choices?.[0]?.message?.content;
+      return verdictExtraction(content);
+    } finally {
+      clearTimeout(timeout);
     }
-    const payload = await response.json() as {
-      choices?: Array<{ message?: { content?: unknown } }>;
-      output?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>;
-    };
-    const content = protocol === "responses"
-      ? payload.output?.flatMap((item) => item.content ?? [])
-        .find((item) => item.type === "output_text")?.text
-      : payload.choices?.[0]?.message?.content;
-    return verdictExtraction(content);
-  } finally {
-    clearTimeout(timeout);
-  }
+  });
 }
 
 // Decides what to do with an incoming claim that has no deterministic identity
