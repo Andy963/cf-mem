@@ -7,6 +7,7 @@ import { corsHeaders, isAuthorized, jsonResponse, textResponse, unauthorizedResp
 import type { Env } from "./env";
 import { runRetentionSweep } from "./memory/retention";
 import { flushReadyEvidenceGroups, processProfileJobs } from "./memory/profile";
+import { runNudgeExtractionScan } from "./memory/nudge";
 
 // Each job runs up to three sequential extractor calls with a 60s timeout each,
 // so three jobs is ~9 minutes worst case — within the waitUntil budget, while
@@ -75,7 +76,11 @@ export default {
     ctx.waitUntil(
       // Flush runs before processing so evidence that just became ready can be
       // picked up in the same tick rather than waiting a full cron interval.
-      flushReadyEvidenceGroups(env)
+      // Nudge scan first: unextracted segments become extraction jobs so
+      // the same flush/process cycle handles them this tick.
+      runNudgeExtractionScan(env).catch((error) => {
+        console.error(`[cron] nudge scan failed: ${error instanceof Error ? error.message : String(error)}`);
+      }).then(() => flushReadyEvidenceGroups(env))
         .catch((error) => {
           console.error(`[cron] evidence_flush failed: ${error instanceof Error ? error.message : String(error)}`);
         })
