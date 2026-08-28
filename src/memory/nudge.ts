@@ -132,14 +132,15 @@ export async function runNudgeExtractionScan(env: Env): Promise<NudgeScanResult>
   for (const { key, ids } of groups.values()) {
     // Ingest stores session_id as `${sourceApp}:${externalSessionId}`; keep the
     // same shape so extraction lineage stays comparable across both paths.
-    const [sourceApp, externalSessionId] = key.sessionId.includes(":")
-      ? [key.sourceApp, key.sessionId.slice(key.sourceApp.length + 1)]
-      : [key.sourceApp, key.sessionId];
+    const colonIndex = key.sessionId.indexOf(":");
+    const externalSessionId = colonIndex >= 0
+      ? key.sessionId.slice(colonIndex + 1)
+      : key.sessionId;
     try {
       await createExtractionJob(env, key.projectId, {
         evidenceSegmentIds: ids,
         ownerId: key.ownerId,
-        sourceApp: sourceApp || "unknown",
+        sourceApp: key.sourceApp || "unknown",
         externalSessionId: externalSessionId || "nudge",
         workspaceId: key.workspaceId || null,
       });
