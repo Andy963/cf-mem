@@ -1,4 +1,4 @@
-# cf-rag 完整参考（Cloudflare Workers AI + D1 + Vectorize）
+# cf-mem 完整参考（Cloudflare Workers AI + D1 + Vectorize）
 
 > 这是完整的接口与运维参考。第一次部署请先阅读根目录 README；所有配置项的集中说明见
 > [`configuration.md`](configuration.md)。
@@ -40,7 +40,7 @@
 安装依赖：
 
 ```bash
-cd cf-rag
+cd cf-mem
 npm install
 ```
 
@@ -58,7 +58,7 @@ cp wrangler.toml.example wrangler.toml
 npx wrangler d1 create cf-text
 ```
 
-把 `wrangler d1 create` 输出的 `database_id` 填回你本地的 `cf-rag/wrangler.toml`。
+把 `wrangler d1 create` 输出的 `database_id` 填回你本地的 `cf-mem/wrangler.toml`。
 
 创建 Vectorize（BGE-M3 维度为 1024）：
 
@@ -132,7 +132,7 @@ npm run deploy
 
 默认不绑定自定义域名，只会部署到 `workers.dev` 域名上（由 Wrangler 输出）。
 
-如果你需要绑定自己的域名路由，在你本地的 `cf-rag/wrangler.toml` 里取消注释并修改：
+如果你需要绑定自己的域名路由，在你本地的 `cf-mem/wrangler.toml` 里取消注释并修改：
 
 ```toml
 # [[routes]]
@@ -214,7 +214,7 @@ src/
 
 ## 数据模型（D1）
 
-表名：`memory_segments`（见 `cf-rag/migrations/0001_init.sql` 和 `cf-rag/migrations/0002_project_isolation.sql`）
+表名：`memory_segments`（见 `cf-mem/migrations/0001_init.sql` 和 `cf-mem/migrations/0002_project_isolation.sql`）
 
 - `id`：项目作用域内唯一 id；若请求未提供，会基于 `project_id + session_id + tape + text` 派生稳定 id
 - `project_id`：项目隔离键
@@ -278,8 +278,8 @@ PROFILE_EXTRACTOR_MODEL
 PERSONAL_MEMORY_OWNER_ID
 ```
 
-Requests carry `HTTP-Referer` (default `https://github.com/Andy963/cf-rag`) and
-`X-OpenRouter-Title` (default `cf-rag`). OpenRouter identifies an app by the referer URL and uses
+Requests carry `HTTP-Referer` (default `https://github.com/Andy963/cf-mem`) and
+`X-OpenRouter-Title` (default `cf-mem`). OpenRouter identifies an app by the referer URL and uses
 the title only as that app's display name, so both must be sent or the calls stay attributed to
 `unknown`; other OpenAI-compatible gateways ignore both. This is what keeps one OpenRouter account
 shared with other clients readable.
@@ -524,7 +524,7 @@ GET /memory/claims?scope_kind=user&scope_id=user-123&status=active&limit=100
 
 ## 升级注意事项
 
-如果你是从旧版 `cf-rag` 升级：
+如果你是从旧版 `cf-mem` 升级：
 
 1. 先执行 `npx wrangler d1 migrations apply cf-text --remote`，把 `project_id` 列和索引补上
 2. 再配置 `PROJECT_TOKENS_JSON` secret

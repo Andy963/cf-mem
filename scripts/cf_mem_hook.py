@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Zero-dependency client hook for cf-rag shared personal preference memory.
+Zero-dependency client hook for cf-mem shared personal preference memory.
 Supports Claude, Codex, Droid, and other AI coding assistants.
 """
 
@@ -16,13 +16,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-_DEFAULT_CONFIG_PATH = Path.home() / ".config" / "cf-rag" / "config.json"
+_DEFAULT_CONFIG_PATH = Path.home() / ".config" / "cf-mem" / "config.json"
 _FALLBACK_CONFIG_PATH = Path.home() / ".config" / "whisper-profile-memory" / "config.json"
 _MAX_CAPTURE_CHARS = 8000
 _MAX_CONTEXT_CLAIMS = 12
 _MAX_CONTEXT_CHARS = 3000
 _DEFAULT_TIMEOUT = 10.0
-_USER_AGENT = "cf-rag-hook/1.0"
+_USER_AGENT = "cf-mem-hook/1.0"
 
 
 def _resolve_config_path(raw_path: str | None = None) -> Path:
@@ -212,7 +212,7 @@ def handle_context(source_app: str, config_path: str | None = None) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="cf-rag memory hook CLI")
+    parser = argparse.ArgumentParser(description="cf-mem memory hook CLI")
     parser.add_argument("--config", help="Path to config file")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

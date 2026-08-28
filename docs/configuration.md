@@ -72,7 +72,7 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 | `PROFILE_EXTRACTOR_PROTOCOL` | `chat_completions` | 抽取器协议，也支持 `responses` |
 | `OPENROUTER_API_BASE` | 无 | `PROFILE_EXTRACTOR_ENDPOINT` 未设置时的回退地址 |
 | `PROFILE_EXTRACTOR_APP_URL` | 项目仓库地址 | 发给 OpenRouter 的应用标识地址 |
-| `PROFILE_EXTRACTOR_APP_TITLE` | `cf-rag` | OpenRouter 中显示的应用名称 |
+| `PROFILE_EXTRACTOR_APP_TITLE` | `cf-mem` | OpenRouter 中显示的应用名称 |
 
 ## 个人记忆自动提炼
 
@@ -84,8 +84,8 @@ PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
 PROFILE_EXTRACTOR_ENDPOINT = "https://openrouter.ai/api/v1"
 PROFILE_EXTRACTOR_MODEL = "your-model"
 PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
-# PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-rag"
-# PROFILE_EXTRACTOR_APP_TITLE = "cf-rag"
+# PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-mem"
+# PROFILE_EXTRACTOR_APP_TITLE = "cf-mem"
 ```
 
 ```bash

@@ -1,4 +1,4 @@
-name = "cf-rag"
+name = "cf-mem"
 main = "src/index.ts"
 compatibility_date = "2026-03-03"
 workers_dev = true
@@ -47,8 +47,8 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # the identity OpenRouter groups activity by; the title is sent as
 # X-OpenRouter-Title and only names that app. A title without a URL stays
 # attributed to "unknown".
-# PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-rag"
-# PROFILE_EXTRACTOR_APP_TITLE = "cf-rag"
+# PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-mem"
+# PROFILE_EXTRACTOR_APP_TITLE = "cf-mem"
 # PERSONAL_MEMORY_PROJECT_ID = "personal"
 # PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
 # TAVILY_BASE_URL = "https://tavily.example.com"

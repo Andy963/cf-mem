@@ -37,7 +37,7 @@ export default {
         return jsonResponse(env, { error: { message: "API_TOKEN is required" } }, { status: 500 });
       }
       if (!isAuthorized(request, apiToken)) {
-        return unauthorizedResponse(env, "cf-rag");
+        return unauthorizedResponse(env, "cf-mem");
       }
 
       return isWebPath(url.pathname)
@@ -52,7 +52,7 @@ export default {
       } catch (error) {
         if (error instanceof RequestAuthError) {
           if (error.status === 401) {
-            return unauthorizedResponse(env, "cf-rag-memory");
+            return unauthorizedResponse(env, "cf-mem-memory");
           }
 
           // Server-side auth errors describe the deployment's secrets, so the
