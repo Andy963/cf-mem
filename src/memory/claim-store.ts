@@ -44,10 +44,11 @@ const lastUsageRecordedAt = new Map<string, number>();
 
 /**
  * Records that the given claims were just injected into an agent turn.
- * Fire-and-forget: callers should not await side-effects of building a
- * response. Errors are swallowed — usage stats must never break recall.
+ * Awaited by the caller: a single batched UPDATE costs a few ms, and it must
+ * complete before the Worker response ends — a fire-and-forget promise gets
+ * killed when the fetch handler returns, silently losing usage data.
  */
-export function recordClaimUsage(env: Env, claimIds: string[]): void {
+export async function recordClaimUsage(env: Env, claimIds: string[]): Promise<void> {
   if (claimIds.length === 0) return;
   const now = Date.now();
   const fresh = claimIds.filter((id) => {
@@ -64,11 +65,15 @@ export function recordClaimUsage(env: Env, claimIds: string[]): void {
     }
   }
   if (fresh.length === 0) return;
-  for (const chunk of chunkArray(fresh, 50)) {
-    const placeholders = chunk.map(() => "?").join(",");
-    env.DB.prepare(
-      `UPDATE memory_claims SET use_count = use_count + 1, last_used_at = ? WHERE id IN (${placeholders})`,
-    ).bind(now, ...chunk).run().catch(() => {});
+  try {
+    for (const chunk of chunkArray(fresh, 50)) {
+      const placeholders = chunk.map(() => "?").join(",");
+      await env.DB.prepare(
+        `UPDATE memory_claims SET use_count = use_count + 1, last_used_at = ? WHERE id IN (${placeholders})`,
+      ).bind(now, ...chunk).run();
+    }
+  } catch {
+    // Usage stats must never break recall.
   }
 }
 
@@ -328,8 +333,8 @@ export async function loadMemoryContext(
     .slice(0, request.limit);
   const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, claims.map((claim) => claim.id));
   // Usage feedback: these claims are about to be injected into an agent turn.
-  // Fire-and-forget so usage stats can never delay or break recall.
-  recordClaimUsage(env, claims.map((claim) => claim.id));
+  // Awaited (cheap single UPDATE) so it completes before the response ends.
+  await recordClaimUsage(env, claims.map((claim) => claim.id));
   return {
     project_id: projectScope.projectId,
     claims: claims.map((claim) => ({
