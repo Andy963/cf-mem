@@ -7,6 +7,8 @@ import { ClaimSchemaError, normalizeClaimMutationRequest } from "./claims";
 import { indexMemoryItems } from "./indexer";
 import { defaultMemorySchema, deriveSegmentIdSuffix } from "./schema";
 import { buildWebReferenceSegments, sanitizeIngestText, WEB_REFERENCE_KIND } from "./web-reference";
+import { withBreaker } from "./llm-breaker";
+import { markSegmentExtractionFailed } from "./nudge";
 import { chunkArray, sha256Hex, truncateText } from "../utils";
 
 const MAX_TEXT_LENGTH = 8_000;
@@ -246,6 +248,20 @@ function extractorConfig(env: Env): ExtractorConfig {
 }
 
 async function callExtractorLlm(
+  env: Env,
+  systemPrompt: string,
+  instructions: string,
+  input: string,
+  maxTokens: number,
+  errorPrefix: string,
+): Promise<string> {
+  // The breaker wraps the whole request so provider outages (5xx/429/timeout)
+  // stop costing every cron tick after 3 consecutive failures; a cooldown
+  // later admits one probe call (half-open). D1 state is written inside.
+  return withBreaker(env, () => callExtractorLlmInner(env, systemPrompt, instructions, input, maxTokens, errorPrefix));
+}
+
+async function callExtractorLlmInner(
   env: Env,
   systemPrompt: string,
   instructions: string,
@@ -651,7 +667,7 @@ function segmentMetadata(row: unknown): Record<string, unknown> {
   }
 }
 
-function isWebReferenceRow(row: unknown): boolean {
+export function isWebReferenceRow(row: unknown): boolean {
   return segmentMetadata(row).kind === WEB_REFERENCE_KIND;
 }
 
@@ -1064,7 +1080,7 @@ export async function enqueueProfileIngest(
  * idempotency key is derived from the sorted evidence ids, so re-flushing the
  * same batch collapses onto the existing job.
  */
-async function createExtractionJob(
+export async function createExtractionJob(
   env: Env,
   projectId: string,
   batch: {
@@ -1171,6 +1187,12 @@ export async function processProfileJob(env: Env, id: string): Promise<void> {
     }
   } catch (error) {
     console.error(`[profile] job=${job.id} attempt=${job.attempt_count} failed: ${errorLabel(error)}`);
+    // Nudge-enqueued evidence must not retry forever: bump each segment's
+    // failure counter so the scan drops them after MAX_FAILED_ATTEMPTS.
+    const evidenceIds = jobEvidenceIds(job);
+    for (const segmentId of evidenceIds) {
+      await markSegmentExtractionFailed(env, segmentId).catch(() => {});
+    }
     try {
       await failJob(env, job, error);
     } catch {
