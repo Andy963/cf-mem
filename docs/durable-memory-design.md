@@ -48,6 +48,8 @@
 | `provenance` | `user_explicit`、`user_confirmed` 或 `model_inferred` |
 | `confidence` | `[0, 1]` 内的数值 |
 | `superseded_by` | 替代它的 claim id（如有） |
+| `use_count` | claim 被注入上下文的累计次数 |
+| `last_used_at` | claim 最近一次被注入上下文的时间 |
 | 有效期与时间戳字段 | 时间维度可审计 |
 
 ### `memory_evidence`

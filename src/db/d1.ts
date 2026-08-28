@@ -7,7 +7,7 @@ const D1_IN_QUERY_CHUNK_SIZE = 99;
 const D1_BATCH_CHUNK_SIZE = 50;
 
 const CLAIM_COLUMNS =
-  "id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, created_at, updated_at";
+  "id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, use_count, last_used_at, created_at, updated_at";
 
 export interface StoredClaimRow extends Record<string, unknown> {
   id: string;
