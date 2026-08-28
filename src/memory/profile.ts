@@ -653,7 +653,17 @@ function jobEvidenceIds(job: ProfileJob): string[] {
 
 function userOriginatedText(text: string): string {
   const matches = [...text.matchAll(/(?:^|\n)\[user\]\s*([\s\S]*?)(?=\n\[[^\]]+\]\s|$)/gi)];
-  return matches.map((match) => match[1].trim()).filter(Boolean).join("\n");
+  if (matches.length > 0) {
+    return matches.map((match) => match[1].trim()).filter(Boolean).join("\n");
+  }
+
+  // Plain /memory/index rows have no role marker and are already classified as
+  // user evidence by their metadata. Keep the full text in that case, but do
+  // not treat a marked non-user conversation as user speech.
+  if (!/(?:^|\n)[ \t]*\[(?:user|assistant|system|tool|web_reference)\]/im.test(text)) {
+    return text.trim();
+  }
+  return "";
 }
 
 function segmentMetadata(row: unknown): Record<string, unknown> {
