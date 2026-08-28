@@ -41,6 +41,16 @@ async function readBreakerState(db: D1Database): Promise<BreakerRow> {
   };
 }
 
+export async function getBreakerOpenUntilAt(env: Env): Promise<number | null> {
+  try {
+    const state = await readBreakerState(env.DB);
+    return state.open_until_at !== null && state.open_until_at > Date.now() ? state.open_until_at : null;
+  } catch {
+    // The preflight check must not block extraction when breaker state is unavailable.
+    return null;
+  }
+}
+
 async function writeBreakerState(
   db: D1Database,
   state: { consecutive_failures: number; open_until_at: number | null; last_error: string | null },

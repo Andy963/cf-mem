@@ -7,7 +7,7 @@ import { ClaimSchemaError, normalizeClaimMutationRequest } from "./claims";
 import { indexMemoryItems } from "./indexer";
 import { defaultMemorySchema, deriveSegmentIdSuffix } from "./schema";
 import { buildWebReferenceSegments, sanitizeIngestText, WEB_REFERENCE_KIND } from "./web-reference";
-import { withBreaker } from "./llm-breaker";
+import { getBreakerOpenUntilAt, isBreakerOpenError, type BreakerOpenError, withBreaker } from "./llm-breaker";
 import { markSegmentExtractionFailed } from "./nudge";
 import { chunkArray, sha256Hex, truncateText } from "../utils";
 
@@ -1021,6 +1021,13 @@ async function failJob(env: Env, job: ProfileJob, error: unknown): Promise<void>
   ).bind(status, errorLabel(error), now + retryDelayMs(job.attempt_count), now, job.id, job.lease_token).run();
 }
 
+async function deferJobAfterBreakerOpen(env: Env, job: ProfileJob, error: BreakerOpenError): Promise<void> {
+  const now = Date.now();
+  await env.DB.prepare(
+    "UPDATE profile_extraction_jobs SET status = 'pending', attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, lease_token = NULL, lease_expires_at = NULL, last_error = ?, next_attempt_at = ?, updated_at = ? WHERE id = ? AND lease_token = ?",
+  ).bind(errorLabel(error), error.openUntilAt, now, job.id, job.lease_token).run();
+}
+
 function evidenceGroupKey(input: { ownerId: string; sourceApp: string; externalSessionId: string; workspaceId: string | null }): string {
   return [input.ownerId, input.sourceApp, input.externalSessionId, input.workspaceId ?? ""].join("\n");
 }
@@ -1186,6 +1193,19 @@ export async function processProfileJob(env: Env, id: string): Promise<void> {
       ).bind(note, Date.now(), job.id).run();
     }
   } catch (error) {
+    if (isBreakerOpenError(error)) {
+      console.warn(`[profile] job=${job.id} postponed: circuit breaker open until ${error.openUntilAt}`);
+      try {
+        await deferJobAfterBreakerOpen(env, job, error);
+      } catch {
+        // Last-resort cleanup without the lease guard; do not count this as a
+        // failed extraction because the provider was not called.
+        await env.DB.prepare(
+          "UPDATE profile_extraction_jobs SET status = 'pending', attempt_count = CASE WHEN attempt_count > 0 THEN attempt_count - 1 ELSE 0 END, lease_token = NULL, lease_expires_at = NULL, last_error = ?, next_attempt_at = ?, updated_at = ? WHERE id = ?",
+        ).bind(errorLabel(error), error.openUntilAt, Date.now(), job.id).run().catch(() => {});
+      }
+      return;
+    }
     console.error(`[profile] job=${job.id} attempt=${job.attempt_count} failed: ${errorLabel(error)}`);
     // Nudge-enqueued evidence must not retry forever: bump each segment's
     // failure counter so the scan drops them after MAX_FAILED_ATTEMPTS.
@@ -1367,6 +1387,11 @@ export async function flushReadyEvidenceGroups(env: Env, limit = 20): Promise<{ 
 }
 
 export async function processProfileJobs(env: Env, limit = 20): Promise<void> {
+  const breakerOpenUntilAt = await getBreakerOpenUntilAt(env);
+  if (breakerOpenUntilAt !== null) {
+    console.info(`[profile] extraction skipped: circuit breaker open until ${breakerOpenUntilAt}`);
+    return;
+  }
   const ids = await nextReadyJobIds(env, Date.now(), Math.min(Math.max(limit, 1), 100));
   for (const id of ids) await processProfileJob(env, id);
 }
