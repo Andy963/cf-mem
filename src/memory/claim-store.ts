@@ -22,6 +22,7 @@ import {
   type ClaimMutationRequest,
   ClaimSchemaError,
   type ContextRequest,
+  isTrivialPrompt,
 } from "./claims";
 import { searchClaimMatches, syncClaimVector } from "./claim-index";
 import { readDedupConfig, resolveSemanticDuplicate, withClaimDedupLock } from "./claim-dedup";
@@ -257,7 +258,7 @@ export async function loadMemoryContext(
     : (await fetchContextClaims(db, projectScope.projectId, request)).filter(
         (claim) => claim.applicability !== "workspace" || (Boolean(request.workspaceId) && claim.workspace_id === request.workspaceId),
       );
-  const semanticMatches = request.query
+  const semanticMatches = request.query && !isTrivialPrompt(request.query)
     ? await searchClaimMatches(env, {
       projectId: projectScope.projectId,
       query: request.query,
