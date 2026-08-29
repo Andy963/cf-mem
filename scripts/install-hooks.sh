@@ -20,7 +20,7 @@ Usage:
 
 Options:
   --cli <name>        Target CLI to install hooks for (codex, droid, claude, all)
-  --base-url <url>    Base URL of cf-mem service (e.g. https://emb.zhougao.win/memory)
+  --base-url <url>    Base URL of cf-mem service (e.g. https://mem.zhougao.win/memory)
   --token <token>     Bearer token for cf-mem authentication
   --owner-id <id>     Owner/user identifier
   -h, --help          Show this help message

@@ -36,19 +36,11 @@ EMBEDDING_MODEL = "@cf/baai/bge-m3"
 RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # Optional: set to true to enable rerank by default for /memory/search.
 # RERANK_DEFAULT_ENABLED = "true"
-# Profile extractor: prefer PROFILE_EXTRACTOR_ENDPOINT. OPENROUTER_API_BASE is
-# accepted as a fallback when the dedicated endpoint var is unset.
+# Extractor LLM: the endpoint must expose an OpenAI-compatible API.
 # These are optional until /memory/profile/ingest is enabled.
-# PROFILE_EXTRACTOR_ENDPOINT = "https://openrouter.ai/api/v1"
-# PROFILE_EXTRACTOR_MODEL = "your-openrouter-model"
+# EXTRACTOR_LLM_API_BASE = "https://your-openai-compatible-endpoint/v1"
+# EXTRACTOR_LLM_MODEL = "your-model"
 # PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
-# OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-# OpenRouter app attribution (optional): the URL is sent as HTTP-Referer and is
-# the identity OpenRouter groups activity by; the title is sent as
-# X-OpenRouter-Title and only names that app. A title without a URL stays
-# attributed to "unknown".
-# PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-mem"
-# PROFILE_EXTRACTOR_APP_TITLE = "cf-mem"
 # PERSONAL_MEMORY_PROJECT_ID = "personal"
 # PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
 # TAVILY_BASE_URL = "https://tavily.example.com"
@@ -62,8 +54,8 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # CLAIM_DEDUP_AUTO_REPLACE = "false"
 # /memory/* requires a PROJECT_TOKENS_JSON secret such as:
 # {"proj-a":"token-for-a","proj-b":"token-for-b"}
-# Profile extractor also needs secrets:
-#   PROFILE_EXTRACTOR_API_KEY
+# Extractor LLM also needs this secret:
+#   EXTRACTOR_LLM_API_KEY
 # Web extraction via the Tavily relay also needs secrets:
 #   TAVILY_API_TOKEN  (the tavily-worker ingress token)
 #   TAVILY_BASE_URL is a normal variable above, not a secret.

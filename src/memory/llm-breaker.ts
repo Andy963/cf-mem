@@ -1,8 +1,8 @@
 import type { Env } from "../env";
 
 // Shared circuit breaker for the extractor LLM endpoint. One upstream
-// (OpenRouter / PROFILE_EXTRACTOR_ENDPOINT) serves profile extraction,
-// verification, reconciliation, and claim-dedup judging. When it starts
+// (EXTRACTOR_LLM_API_BASE) serves profile extraction, verification,
+// reconciliation, and claim-dedup judging. When it starts
 // failing, the breaker opens so cron ticks stop hammering a dead endpoint;
 // after the cooldown a single real call is allowed through (half-open) and
 // success closes it. State lives in a single D1 row because Workers have no

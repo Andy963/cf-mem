@@ -47,7 +47,7 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 | `API_TOKEN` | 使用 `/`、`/health`、`/embed`、`/v1/embeddings` 或 `/web/*` | Embedding 和网页接口共用的鉴权 token |
 | `PROJECT_TOKENS_JSON` | 使用项目级 `/memory/*` | JSON 对象，键是项目 ID，值是项目 token |
 | `PERSONAL_MEMORY_TOKEN` | 使用个人项目的 `/memory/*` | 单独的个人项目 token |
-| `PROFILE_EXTRACTOR_API_KEY` | 使用个人记忆自动提炼 | 抽取、验证、对齐请求使用的模型 key |
+| `EXTRACTOR_LLM_API_KEY` | 使用个人记忆自动提炼 | 抽取、验证、对齐请求使用的模型 key |
 | `TAVILY_API_TOKEN` | 使用 Tavily 搜索、抓取或网页提取 | Tavily Worker 的访问 token |
 
 ## 普通变量
@@ -67,12 +67,9 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 | `RAW_MEMORY_MAX_BYTES_PER_PROJECT` | `104857600` | 每个项目的原始记忆逻辑字节上限 |
 | `RAW_MEMORY_TARGET_BYTES_PER_PROJECT` | `83886080` | 超过上限后清理到的目标水位 |
 | `ADMIN_ALLOWED_EMAIL` | 无 | Cloudflare Access 管理员邮箱，小写比较 |
-| `PROFILE_EXTRACTOR_ENDPOINT` | 无 | 个人记忆抽取器地址 |
-| `PROFILE_EXTRACTOR_MODEL` | 无 | 个人记忆抽取、验证和对齐使用的模型 |
+| `EXTRACTOR_LLM_API_BASE` | 无 | 个人记忆抽取器的 OpenAI 兼容接口地址 |
+| `EXTRACTOR_LLM_MODEL` | 无 | 个人记忆抽取、验证和对齐使用的模型 |
 | `PROFILE_EXTRACTOR_PROTOCOL` | `chat_completions` | 抽取器协议，也支持 `responses` |
-| `OPENROUTER_API_BASE` | 无 | `PROFILE_EXTRACTOR_ENDPOINT` 未设置时的回退地址 |
-| `PROFILE_EXTRACTOR_APP_URL` | 项目仓库地址 | 发给 OpenRouter 的应用标识地址 |
-| `PROFILE_EXTRACTOR_APP_TITLE` | `cf-mem` | OpenRouter 中显示的应用名称 |
 
 ## 个人记忆自动提炼
 
@@ -81,22 +78,18 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 ```toml
 [vars]
 PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
-PROFILE_EXTRACTOR_ENDPOINT = "https://openrouter.ai/api/v1"
-PROFILE_EXTRACTOR_MODEL = "your-model"
+EXTRACTOR_LLM_API_BASE = "https://cpa.zhougao.win/v1"
+EXTRACTOR_LLM_MODEL = "gemini-3.7-flash-high"
 PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
-# PROFILE_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-mem"
-# PROFILE_EXTRACTOR_APP_TITLE = "cf-mem"
 ```
 
 ```bash
 npx wrangler secret put PERSONAL_MEMORY_TOKEN
-npx wrangler secret put PROFILE_EXTRACTOR_API_KEY
+npx wrangler secret put EXTRACTOR_LLM_API_KEY
 ```
 
-`PROFILE_EXTRACTOR_ENDPOINT` 未设置时，可以用 `OPENROUTER_API_BASE` 作为回退地址。
-`PROFILE_EXTRACTOR_PROTOCOL` 支持 `chat_completions` 和 `responses`。如果使用
-OpenRouter，`PROFILE_EXTRACTOR_APP_URL` 会作为 `HTTP-Referer`，`PROFILE_EXTRACTOR_APP_TITLE`
-会作为应用显示名称。
+`PROFILE_EXTRACTOR_PROTOCOL` 支持 `chat_completions` 和 `responses`。当前端点使用
+OpenAI 兼容的请求格式，因此保持 `chat_completions` 即可，不需要改成模型厂商专用协议。
 
 批处理和语义召回可以按需调整：
 

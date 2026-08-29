@@ -22,8 +22,6 @@ const DEFAULT_SAME_SCORE = 0.92;
 const DEFAULT_REVIEW_MIN_SCORE = 0.75;
 const DEFAULT_TOP_K = 12;
 
-const DEFAULT_DEDUP_APP_TITLE = "cf-mem";
-const DEFAULT_DEDUP_APP_URL = "https://github.com/Andy963/cf-mem";
 const DEDUP_LLM_TIMEOUT_MS = 15_000;
 const DEDUP_LOCK_TTL_MS = 120_000;
 const DEDUP_LOCK_WAIT_MS = 30_000;
@@ -82,9 +80,9 @@ export function readDedupConfig(env: Env): DedupConfig {
     llmEnabled:
       readBoolEnv(env.CLAIM_DEDUP_LLM_ENABLED, true) &&
       protocol !== null &&
-      Boolean(env.PROFILE_EXTRACTOR_ENDPOINT?.trim() || env.OPENROUTER_API_BASE?.trim()) &&
-      Boolean(env.PROFILE_EXTRACTOR_API_KEY?.trim()) &&
-      Boolean(env.PROFILE_EXTRACTOR_MODEL?.trim()),
+      Boolean(env.EXTRACTOR_LLM_API_BASE?.trim()) &&
+      Boolean(env.EXTRACTOR_LLM_API_KEY?.trim()) &&
+      Boolean(env.EXTRACTOR_LLM_MODEL?.trim()),
     // Off by default: auto-superseding an active claim silently rewrites
     // remembered history. Opt in only when the feeding pipeline is trusted to
     // judge "newer state" correctly.
@@ -214,7 +212,7 @@ export async function judgeClaimPair(
 
   const protocol = extractorProtocol(env);
   if (!protocol) return null;
-  const endpoint = (env.PROFILE_EXTRACTOR_ENDPOINT?.trim() || env.OPENROUTER_API_BASE?.trim() || "").replace(/\/+$/, "");
+  const endpoint = (env.EXTRACTOR_LLM_API_BASE?.trim() || "").replace(/\/+$/, "");
   const endpointSuffix = protocol === "responses" ? "/responses" : "/chat/completions";
   const url = endpoint.endsWith(endpointSuffix) ? endpoint : `${endpoint}${endpointSuffix}`;
   const systemPrompt = [
@@ -245,21 +243,19 @@ export async function judgeClaimPair(
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${env.PROFILE_EXTRACTOR_API_KEY?.trim() ?? ""}`,
-          "HTTP-Referer": env.PROFILE_EXTRACTOR_APP_URL?.trim() || DEFAULT_DEDUP_APP_URL,
-          "X-OpenRouter-Title": env.PROFILE_EXTRACTOR_APP_TITLE?.trim() || DEFAULT_DEDUP_APP_TITLE,
+          authorization: `Bearer ${env.EXTRACTOR_LLM_API_KEY?.trim() ?? ""}`,
         },
         body: JSON.stringify(
           protocol === "responses"
             ? {
-              model: env.PROFILE_EXTRACTOR_MODEL?.trim(),
+              model: env.EXTRACTOR_LLM_MODEL?.trim(),
               instructions: systemPrompt,
               input: `${input}\n\nReturn JSON only.`,
               text: { format: { type: "json_object" } },
               max_output_tokens: 200,
             }
             : {
-              model: env.PROFILE_EXTRACTOR_MODEL?.trim(),
+              model: env.EXTRACTOR_LLM_MODEL?.trim(),
               temperature: 0,
               max_tokens: 200,
               messages: [

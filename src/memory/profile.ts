@@ -212,23 +212,18 @@ function parseEvidenceIngestInput(value: unknown): {
 
 type ExtractorProtocol = "chat_completions" | "responses";
 
-const DEFAULT_EXTRACTOR_APP_TITLE = "cf-mem";
-const DEFAULT_EXTRACTOR_APP_URL = "https://github.com/Andy963/cf-mem";
-
 interface ExtractorConfig {
   endpoint: string;
   apiKey: string;
   model: string;
   protocol: ExtractorProtocol;
-  appTitle: string;
-  appUrl: string;
 }
 
 function extractorConfig(env: Env): ExtractorConfig {
   const protocol = env.PROFILE_EXTRACTOR_PROTOCOL?.trim() || "chat_completions";
-  const rawEndpoint = (env.PROFILE_EXTRACTOR_ENDPOINT?.trim() || env.OPENROUTER_API_BASE?.trim() || "").replace(/\/+$/, "");
-  const apiKey = env.PROFILE_EXTRACTOR_API_KEY?.trim();
-  const model = env.PROFILE_EXTRACTOR_MODEL?.trim();
+  const rawEndpoint = (env.EXTRACTOR_LLM_API_BASE?.trim() || "").replace(/\/+$/, "");
+  const apiKey = env.EXTRACTOR_LLM_API_KEY?.trim();
+  const model = env.EXTRACTOR_LLM_MODEL?.trim();
   if (!rawEndpoint || !apiKey || !model) throw new Error("Profile extractor is not configured");
   if (protocol !== "chat_completions" && protocol !== "responses") {
     throw new Error("PROFILE_EXTRACTOR_PROTOCOL must be chat_completions or responses");
@@ -240,10 +235,6 @@ function extractorConfig(env: Env): ExtractorConfig {
     apiKey,
     model,
     protocol,
-    // OpenRouter keys an app on its URL, not on the title, so both headers have
-    // to travel together for dashboard activity to leave the "unknown" bucket.
-    appTitle: env.PROFILE_EXTRACTOR_APP_TITLE?.trim() || DEFAULT_EXTRACTOR_APP_TITLE,
-    appUrl: env.PROFILE_EXTRACTOR_APP_URL?.trim() || DEFAULT_EXTRACTOR_APP_URL,
   };
 }
 
@@ -297,12 +288,6 @@ async function callExtractorLlmInner(
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${config.apiKey}`,
-        // HTTP-Referer is the app identity OpenRouter attributes usage to; the
-        // title only renames an app that the referer already created. Sending
-        // the title alone leaves every call in the "unknown" bucket. Other
-        // OpenAI-compatible gateways ignore both.
-        "HTTP-Referer": config.appUrl,
-        "X-OpenRouter-Title": config.appTitle,
       },
       body: JSON.stringify(requestBody),
       signal: controller.signal,

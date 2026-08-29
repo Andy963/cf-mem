@@ -272,17 +272,14 @@ model calls out of the ingest request prevents a short request lifecycle from st
 job. The extractor endpoint, key, model, and fixed personal owner ID are Worker-only bindings:
 
 ```text
-PROFILE_EXTRACTOR_ENDPOINT   # or OPENROUTER_API_BASE as a fallback
-PROFILE_EXTRACTOR_API_KEY
-PROFILE_EXTRACTOR_MODEL
+EXTRACTOR_LLM_API_BASE
+EXTRACTOR_LLM_API_KEY
+EXTRACTOR_LLM_MODEL
 PERSONAL_MEMORY_OWNER_ID
 ```
 
-Requests carry `HTTP-Referer` (default `https://github.com/Andy963/cf-mem`) and
-`X-OpenRouter-Title` (default `cf-mem`). OpenRouter identifies an app by the referer URL and uses
-the title only as that app's display name, so both must be sent or the calls stay attributed to
-`unknown`; other OpenAI-compatible gateways ignore both. This is what keeps one OpenRouter account
-shared with other clients readable.
+The extractor only sends the standard bearer token and JSON request headers. The configured endpoint
+must expose an OpenAI-compatible Chat Completions API.
 
 The extractor must be OpenAI Chat Completions compatible. It runs candidate extraction, independent
 promotion verification, then reconciliation against existing active claims. Reconciliation only
@@ -474,7 +471,7 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
 这样过滤会在 topK 截断前执行。相似度 ≥
 `CLAIM_DEDUP_SAME_SCORE`（默认 `0.92`）视为同义事实，自动转为 reinforce；低于
 `CLAIM_DEDUP_REVIEW_MIN_SCORE`（默认 `0.75`）视为新事实直接插入；之间的灰区交给配置的
-LLM（Profile Extractor 端点）三选一裁决：`same` 转 reinforce、`update` 按
+LLM（提取器端点）三选一裁决：`same` 转 reinforce、`update` 按
 `CLAIM_DEDUP_AUTO_REPLACE` 决定是否自动替换（默认关闭，报错提示改用 supersede）、`conflict`
 拒绝写入并提示走显式操作。LLM 不可用时灰区降级为直接插入，宁可暂存可能重复的 claim，也不静默合并。
 `PROFILE_EXTRACTOR_PROTOCOL=responses` 时灰区裁决使用 Responses API；并发写入按 project/scope/type/workspace
