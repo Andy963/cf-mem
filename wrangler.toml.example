@@ -23,7 +23,7 @@ index_name = "cf-claims"
 # Optional: bind a custom domain route (uncomment and edit).
 #
 # [[routes]]
-# pattern = "emb.example.com/*"
+# pattern = "mem.example.com/*"
 # zone_name = "example.com"
 
 [vars]

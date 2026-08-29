@@ -1,5 +1,5 @@
 {
-  "base_url": "https://mem.zhougao.win/memory",
+  "base_url": "https://mem.example.com/memory",
   "token": "your_project_or_api_token_here",
   "owner_id": "owner_your_user_id_here"
 }

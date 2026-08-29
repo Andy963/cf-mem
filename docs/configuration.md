@@ -78,7 +78,7 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 ```toml
 [vars]
 PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
-EXTRACTOR_LLM_API_BASE = "https://cpa.zhougao.win/v1"
+EXTRACTOR_LLM_API_BASE = "https://api.example.com/v1"
 EXTRACTOR_LLM_MODEL = "gemini-3.7-flash-high"
 PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
 ```

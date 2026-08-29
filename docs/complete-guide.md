@@ -136,7 +136,7 @@ npm run deploy
 
 ```toml
 # [[routes]]
-# pattern = "emb.example.com/*"
+# pattern = "mem.example.com/*"
 # zone_name = "example.com"
 ```
 
@@ -149,7 +149,7 @@ actions outside the administrator's explicit edits, retractions, and tag changes
 are recorded with the Cloudflare Access email, timestamp, reason, and before/after snapshots; the
 original claim is never physically deleted. It never exposes API tokens.
 
-Protect both `emb.example.com/admin*` and `emb.example.com/admin/api/*` with one Cloudflare Access
+Protect both `mem.example.com/admin*` and `mem.example.com/admin/api/*` with one Cloudflare Access
 Application. Configure the Access policy to allow the administrator's email, then set the same
 lowercase email as `ADMIN_ALLOWED_EMAIL` in `[vars]`. Access injects
 `Cf-Access-Authenticated-User-Email`; the Worker verifies it against that value before rendering
