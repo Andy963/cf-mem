@@ -190,7 +190,7 @@ Claims 的 `create` 会先检查身份键，再在同一项目、scope、分类�
 持久记忆支持 `rule`、`tool_insight`、`user_profile`、`domain_fact` 和 `task_state` 五类。
 `/memory/context` 可通过 `categories`、`workspace_id` 和 `scope_id` 做按需路由；未指定
 `categories` 时保持兼容旧调用，返回原有 scope 内的有效 Claims（不广播新分类的 `tool_insight`）。`/memory/search` 默认只检索
-`domain_fact` 原始段落；需要其他分类时显式传入 `categories`，并确保索引元数据包含对应字段。
+`domain_fact` 原始段落；`profile_inbox` 仅作为提炼证据，始终不会出现在原始搜索结果中。需要其他分类时显式传入 `categories`，并确保索引元数据包含对应字段。
 
 所有接口的完整请求格式、限制和返回值见
 [`docs/complete-guide.md`](docs/complete-guide.md)。

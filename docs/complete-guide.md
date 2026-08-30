@@ -523,7 +523,8 @@ segment ids。若传入 `query`，Worker 会把固定 scope 内存与专用 clai
 
 对 `domain_fact` 与 `user_profile` claim，响应还会返回 `active_score`。它按置信度、距最近使用的天数
 和 `use_count` 计算，用于观察记忆活跃度；`rule`、`tool_insight` 与 `task_state` 返回 `null`，不参与时间衰减。
-`task_state` claim 必须提供未来的 `valid_until`；过期状态不会被上下文路由返回。
+`task_state` claim 必须提供未来的 `valid_until`；过期状态不会被上下文路由返回。所有 task state
+还必须携带并精确匹配请求的 `workspace_id`；无法归属工作区的历史状态仅保留审计记录，不会再进入上下文。
 
 例如，SessionStart 可以只请求全局规则、当前工作区规则和用户画像：
 
@@ -537,7 +538,8 @@ segment ids。若传入 `query`，Worker 会把固定 scope 内存与专用 clai
 ```
 
 `POST /memory/search` 的 `categories` 支持逗号分隔字符串或数组；未指定时按
-`domain_fact` 处理。原始 segment 没有分类元数据时按兼容规则视为 `domain_fact`。
+`domain_fact` 处理。原始 segment 没有分类元数据时按兼容规则视为 `domain_fact`，但内部
+`profile_inbox` 证据始终排除，避免用户画像提炼的原始对话进入事实检索。
 
 未指定 `categories` 的旧版 `/memory/context` 请求仍保留原有 scope 路由，但不会广播
 `tool_insight`；工具经验必须通过显式的 `tool_insight` 分类和 `scope_id` 请求。

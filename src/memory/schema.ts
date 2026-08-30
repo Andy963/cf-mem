@@ -335,6 +335,11 @@ export const defaultMemorySchema: MemoryShapeAdapter = {
   matchesFilter(row: StoredMemoryRow | undefined, metadata: unknown, request: SearchRequestInput): boolean {
     if (row?.project_id !== request.projectId) return false;
 
+    // Profile evidence is an internal extraction input, never a searchable
+    // domain record. Existing rows might predate the category tag, so use the
+    // pipeline kind as the authoritative exclusion.
+    if (getByPath(metadata, "kind") === "profile_inbox") return false;
+
     const metadataProjectId = getByPath(metadata, "project_id");
     if (metadataProjectId !== undefined && normalizeProjectId(metadataProjectId) !== request.projectId) {
       return false;

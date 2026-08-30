@@ -306,6 +306,12 @@ function isApplicableContextClaim(
   if (claim.valid_until !== null && claim.valid_until <= now) return false;
   if (claim.category === "task_state" || claim.type === "task_state") {
     if (claim.valid_until === null || claim.valid_until <= now) return false;
+    // Task state is a resumable workspace handoff, not a project-wide fact.
+    // Enforce the current taxonomy at the routing boundary as well, so legacy
+    // rows written before the category migration cannot leak across workspaces.
+    if (claim.applicability !== "workspace" || !request.workspaceId || claim.workspace_id !== request.workspaceId) {
+      return false;
+    }
   }
   if (request.types && !request.types.includes(claim.type)) return false;
   if (claim.applicability === "workspace" && (!request.workspaceId || claim.workspace_id !== request.workspaceId)) return false;

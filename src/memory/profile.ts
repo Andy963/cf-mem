@@ -1227,6 +1227,9 @@ export async function enqueueProfileIngest(
     metadata: {
       session_id: `${input.sourceApp}:${input.externalSessionId}`,
       kind: "profile_inbox",
+      // Buffered conversation evidence is not a domain fact. Tag it so the
+      // default raw-memory search cannot surface personal prompts as RAG facts.
+      category: "user_profile",
       source_app: input.sourceApp,
       user_id: ownerId,
       workspace_id: input.workspaceId ?? "",
