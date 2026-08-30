@@ -4,6 +4,7 @@ import { sha256Hex, truncateText } from "../utils";
 import { extractUrlsFromText, fetchPages, isFetchFailure } from "../web/fetch";
 import { indexMemoryItems } from "./indexer";
 import { defaultMemorySchema, deriveSegmentIdSuffix } from "./schema";
+import { normalizeExternalSessionId } from "./session";
 
 export const WEB_REFERENCE_KIND = "web_reference";
 
@@ -77,6 +78,10 @@ export async function buildWebReferenceSegments(
   }
   if (urls.length === 0) return [];
 
+  const sourceApp = context.sourceApp.trim().toLowerCase();
+  const externalSessionId = normalizeExternalSessionId(sourceApp, context.externalSessionId);
+  if (!sourceApp || !externalSessionId) return [];
+
   const pages = await fetchPages(env, urls, { maxChars: MAX_REFERENCE_CHARS });
   const items = [];
   for (const page of pages) {
@@ -94,7 +99,7 @@ export async function buildWebReferenceSegments(
       id: deriveSegmentIdSuffix(scope, "wr_", contentHash, REFERENCE_HASH_CHARS),
       text,
       metadata: {
-        session_id: `${context.sourceApp}:${context.externalSessionId}`,
+        session_id: `${sourceApp}:${externalSessionId}`,
         kind: WEB_REFERENCE_KIND,
         source_app: context.sourceApp,
         user_id: context.ownerId,

@@ -35,21 +35,61 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
   const baseCandidateTopK = defaultMemorySchema.getCandidateTopK(requestInput);
   const candidateTopK = rerankConfig ? Math.max(baseCandidateTopK, rerankConfig.topN) : baseCandidateTopK;
   const filter = defaultMemorySchema.getFilter(requestInput);
+  const hasClientFilter = Boolean(filter || requestInput.categories?.length);
   const [queryVector] = await embedTexts(env, [defaultMemorySchema.getQueryText(requestInput)]);
 
-  const queryResult = await env.SEGMENTS_INDEX.query(queryVector, {
-    topK: candidateTopK,
-    namespace: requestInput.namespace,
-    filter,
-  });
-  const rawMatches = [...toQueryMatches(queryResult)];
+  let rawMatches: ReturnType<typeof toQueryMatches> = [];
+  try {
+    const queryResult = await env.SEGMENTS_INDEX.query(queryVector, {
+      topK: candidateTopK,
+      namespace: requestInput.namespace,
+      filter,
+    });
+    rawMatches = [...toQueryMatches(queryResult)];
+  } catch (error) {
+    if (!hasClientFilter) throw error;
+  }
 
   // A filtered query only returns hits when Vectorize has a metadata index for
   // those properties. Fall back to an unfiltered query and let the D1-side
   // matchesFilter do the work — but merge, never replace: the filtered hits are
   // exactly the ones most likely to survive filtering, and dropping them made
   // recall worse than not falling back at all.
-  if (filter && rawMatches.length < requestedTopK) {
+  const desiredCandidateCount = rerankConfig ? rerankConfig.topN : requestedTopK;
+  const collectCandidates = async (vectorMatches: ReturnType<typeof toQueryMatches>): Promise<Array<{
+    row: StoredMemoryRow;
+    metadata: unknown;
+    vectorScore: number | null;
+  }>> => {
+    const matches = vectorMatches
+      .filter((match) => match && typeof match.id === "string")
+      .map((match) => ({
+        id: match.id,
+        score: typeof match.score === "number" ? match.score : null,
+        metadata: match.metadata ?? null,
+      }));
+    const rowsById = await fetchByIds(env.DB, requestInput.projectId, matches.map((match) => match.id));
+    const candidates: Array<{
+      row: StoredMemoryRow;
+      metadata: unknown;
+      vectorScore: number | null;
+    }> = [];
+
+    for (const match of matches) {
+      const row = rowsById.get(match.id);
+      if (!row) continue;
+
+      const metadata = parseRowMetadata(row);
+      if (!defaultMemorySchema.matchesFilter(row, metadata, requestInput)) continue;
+
+      candidates.push({ row, metadata, vectorScore: match.score });
+      if (candidates.length >= desiredCandidateCount) break;
+    }
+    return candidates;
+  };
+
+  let candidates = await collectCandidates(rawMatches);
+  if (hasClientFilter && candidates.length < desiredCandidateCount) {
     const unfilteredResult = await env.SEGMENTS_INDEX.query(queryVector, {
       topK: candidateTopK,
       namespace: requestInput.namespace,
@@ -61,34 +101,7 @@ export async function searchMemoryItems(env: Env, requestInput: SearchRequestInp
       rawMatches.push(match);
     }
     rawMatches.sort((a, b) => (b.score ?? Number.NEGATIVE_INFINITY) - (a.score ?? Number.NEGATIVE_INFINITY));
-  }
-
-  const matches = rawMatches
-    .filter((match) => match && typeof match.id === "string")
-    .map((match) => ({
-      id: match.id,
-      score: typeof match.score === "number" ? match.score : null,
-      metadata: match.metadata ?? null,
-    }));
-
-  const rowsById = await fetchByIds(env.DB, requestInput.projectId, matches.map((match) => match.id));
-  const candidates: Array<{
-    row: StoredMemoryRow;
-    metadata: unknown;
-    vectorScore: number | null;
-  }> = [];
-
-  const desiredCandidateCount = rerankConfig ? rerankConfig.topN : requestedTopK;
-
-  for (const match of matches) {
-    const row = rowsById.get(match.id);
-    if (!row) continue;
-
-    const metadata = parseRowMetadata(row);
-    if (!defaultMemorySchema.matchesFilter(row, metadata, requestInput)) continue;
-
-    candidates.push({ row, metadata, vectorScore: match.score });
-    if (candidates.length >= desiredCandidateCount) break;
+    candidates = await collectCandidates(rawMatches);
   }
 
   if (candidates.length === 0) {

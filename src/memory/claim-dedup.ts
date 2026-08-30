@@ -6,9 +6,9 @@ import {
 import type { Env } from "../env";
 import type { ProjectScope } from "../project";
 import { readBoolEnv } from "../utils";
-import { findVectorizedClaimMatches } from "./claim-index";
+import { cosineSimilarity, findVectorizedClaimMatches } from "./claim-index";
 import { type ClaimInput, ClaimSchemaError } from "./claims";
-import { withBreaker } from "./llm-breaker";
+import { isBreakerOpenError, withBreaker } from "./llm-breaker";
 
 // Deterministic identity keys (see fetchActiveClaimByIdentity) only catch claims
 // written with byte-identical subject/memory_key/value/canonical_text. Extraction
@@ -20,6 +20,7 @@ import { withBreaker } from "./llm-breaker";
 
 const DEFAULT_SAME_SCORE = 0.92;
 const DEFAULT_REVIEW_MIN_SCORE = 0.75;
+const RULE_TOOL_SUPERSEDE_MIN_SCORE = 0.85;
 const DEFAULT_TOP_K = 12;
 
 const DEDUP_LLM_TIMEOUT_MS = 15_000;
@@ -95,25 +96,6 @@ interface SemanticMatch {
   score: number;
 }
 
-function cosineSimilarity(left: number[], right: number[]): number | null {
-  if (left.length === 0 || left.length !== right.length) return null;
-
-  let dot = 0;
-  let leftMagnitude = 0;
-  let rightMagnitude = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    const leftValue = left[index];
-    const rightValue = right[index];
-    if (!Number.isFinite(leftValue) || !Number.isFinite(rightValue)) return null;
-    dot += leftValue * rightValue;
-    leftMagnitude += leftValue * leftValue;
-    rightMagnitude += rightValue * rightValue;
-  }
-
-  const denominator = Math.sqrt(leftMagnitude * rightMagnitude);
-  return denominator > 0 ? dot / denominator : null;
-}
-
 async function findNearestSemanticMatch(
   env: Env,
   db: D1Database,
@@ -133,6 +115,7 @@ async function findNearestSemanticMatch(
       status: "active",
       scope_kind: claim.scopeKind,
       scope_id: claim.scopeId,
+      category: claim.category,
       type: claim.type,
       workspace_id: claim.workspaceId ?? "",
     },
@@ -193,7 +176,12 @@ function verdictExtraction(content: unknown): Verdict {
   if (start === -1 || end <= start) {
     throw new Error(`claim_dedup_llm_missing_verdict:${text.slice(0, 200)}`);
   }
-  const parsed = JSON.parse(text.slice(start, end + 1)) as { verdict?: unknown };
+  let parsed: { verdict?: unknown };
+  try {
+    parsed = JSON.parse(text.slice(start, end + 1)) as { verdict?: unknown };
+  } catch {
+    throw new Error(`claim_dedup_llm_invalid_json:${text.slice(0, 200)}`);
+  }
   if (parsed.verdict === "same" || parsed.verdict === "update" || parsed.verdict === "conflict") {
     return parsed.verdict;
   }
@@ -225,11 +213,13 @@ export async function judgeClaimPair(
   ].join("\n");
   const input = [
     "Existing claim:",
+    `- category: ${existing.category}`,
     `- type: ${existing.type}`,
     `- canonical_text: ${existing.canonical_text}`,
     `- value: ${existing.value_json}`,
     "",
     "Incoming claim:",
+    `- category: ${incoming.category}`,
     `- type: ${incoming.type}`,
     `- canonical_text: ${incoming.canonicalText}`,
     `- value: ${JSON.stringify(incoming.value) ?? "null"}`,
@@ -301,7 +291,10 @@ export async function resolveSemanticDuplicate(
   const match = await findNearestSemanticMatch(env, db, projectId, claim, config);
   if (!match) return { kind: "insert", meta: insertMeta(null, null) };
 
-  if (match.score >= config.sameScore) {
+  const isRuleOrTool = claim.category === "rule" || claim.category === "tool_insight";
+  const sameValue = match.claim.value_json === JSON.stringify(claim.value)
+    && match.claim.canonical_text === claim.canonicalText;
+  if (match.score >= config.sameScore && (!isRuleOrTool || sameValue)) {
     return { kind: "reinforce", match: match.claim, meta: { provider: "vector", matched_claim_id: match.claim.id, score: match.score, verdict: "same" } };
   }
   if (match.score < config.reviewMinScore) {
@@ -309,15 +302,32 @@ export async function resolveSemanticDuplicate(
   }
 
   // Gray zone: close enough that plain insertion invites duplicates, too far
-  // apart to trust the threshold alone. Fail open on judge outages: recording a
-  // possibly-duplicate claim is reversible via admin tooling; silently merging
-  // unrelated facts is not.
+  // apart to trust the threshold alone. Rule and tool claims fail closed when
+  // the judge is unavailable because an unjudged active rule can conflict with
+  // an existing one. Other categories retain the historical insertion fallback.
   let verdict: Verdict;
   try {
     const judged = await judgeClaimPair(env, match.claim, claim);
-    if (!judged) return { kind: "insert", meta: insertMeta(match, null) };
+    if (!judged) {
+      if (isRuleOrTool) {
+        throw new ClaimSchemaError(
+          `Semantic judge unavailable (score=${match.score.toFixed(3)}, claim_id=${match.claim.id}): rule and tool_insight claims are not written without a verdict`,
+        );
+      }
+      return { kind: "insert", meta: insertMeta(match, null) };
+    }
     verdict = judged;
   } catch (error) {
+    if (isBreakerOpenError(error)) throw error;
+    if (isRuleOrTool) {
+      console.error(`[claims] dedup judge unavailable, rejecting rule/tool claim (score=${match.score.toFixed(3)}, existing=${match.claim.id}): ${error instanceof Error ? error.message : String(error)}`);
+      throw Object.assign(
+        new ClaimSchemaError(
+          `Semantic judge unavailable (score=${match.score.toFixed(3)}, claim_id=${match.claim.id}): rule and tool_insight claims are not written without a verdict`,
+        ),
+        { dedup: { score: match.score, matched_claim_id: match.claim.id } },
+      );
+    }
     console.error(`[claims] dedup judge unavailable, inserting unmerged claim (score=${match.score.toFixed(3)}, existing=${match.claim.id}): ${error instanceof Error ? error.message : String(error)}`);
     return { kind: "insert", meta: insertMeta(match, null) };
   }
@@ -327,11 +337,31 @@ export async function resolveSemanticDuplicate(
   }
   if (verdict === "update") {
     // Auto-replace is gated because it silently rewrites history: an extraction
-    // hiccup could supersede a user-confirmed fact with a weaker inference.
-    if (!config.autoReplace) {
+    // hiccup could supersede a user-confirmed fact with a weaker inference,
+    // but rules and tool_insights follow semantic superseding by design.
+    if (isRuleOrTool && match.score <= RULE_TOOL_SUPERSEDE_MIN_SCORE) {
+      throw Object.assign(
+        new ClaimSchemaError(
+          `Semantic update detected (score=${match.score.toFixed(3)}, claim_id=${match.claim.id}): rule and tool_insight superseding requires cosine similarity > ${RULE_TOOL_SUPERSEDE_MIN_SCORE}; use the supersede operation explicitly`,
+        ),
+        { dedup: { score: match.score, matched_claim_id: match.claim.id } },
+      );
+    }
+    if (!config.autoReplace && !isRuleOrTool) {
       throw Object.assign(
         new ClaimSchemaError(
           `Semantic update detected (score=${match.score.toFixed(3)}, claim_id=${match.claim.id}): the LLM judged the incoming claim a newer state; automatic replacement is disabled, so use the supersede operation`,
+        ),
+        { dedup: { score: match.score, matched_claim_id: match.claim.id } },
+      );
+    }
+    return { kind: "replace", match: match.claim, meta: { provider: "llm", matched_claim_id: match.claim.id, score: match.score, verdict } };
+  }
+  if (isRuleOrTool) {
+    if (match.score <= RULE_TOOL_SUPERSEDE_MIN_SCORE) {
+      throw Object.assign(
+        new ClaimSchemaError(
+          `Semantic conflict detected (score=${match.score.toFixed(3)}, claim_id=${match.claim.id}): rule and tool_insight superseding requires cosine similarity > ${RULE_TOOL_SUPERSEDE_MIN_SCORE}; use the supersede operation explicitly`,
         ),
         { dedup: { score: match.score, matched_claim_id: match.claim.id } },
       );

@@ -37,6 +37,7 @@ interface AdminClaimRow {
   project_id: string;
   scope_kind: string;
   scope_id: string;
+  category: string;
   type: string;
   subject: string;
   memory_key: string;
@@ -163,7 +164,7 @@ async function syncAdminClaimVector(env: Env, claim: StoredClaimRow): Promise<vo
 
 async function requireAdminClaim(env: Env, claimId: string): Promise<StoredClaimRow> {
   const claim = await env.DB.prepare(
-    `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, created_at, updated_at
+    `SELECT id, project_id, scope_kind, scope_id, category, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, use_count, last_used_at, created_at, updated_at
      FROM memory_claims WHERE id = ?`,
   ).bind(claimId).first<StoredClaimRow>();
   if (!claim) throw new Error("Claim not found");
@@ -354,7 +355,7 @@ async function listAdminClaims(env: Env, filters: ClaimListFilters): Promise<{ p
   const [count, claims] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) AS total FROM memory_claims WHERE ${where}`).bind(...bindings).first<{ total: number }>(),
     env.DB.prepare(
-      `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, use_count, last_used_at, created_at, updated_at,
+      `SELECT id, project_id, scope_kind, scope_id, category, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, use_count, last_used_at, created_at, updated_at,
        COALESCE((SELECT GROUP_CONCAT(DISTINCT json_extract(s.metadata_json, '$.source_app')) FROM memory_evidence AS e JOIN memory_segments AS s ON s.id = e.segment_id AND s.project_id = e.project_id WHERE e.claim_id = memory_claims.id AND json_extract(s.metadata_json, '$.source_app') IS NOT NULL), '') AS sources,
        COALESCE((SELECT GROUP_CONCAT(tag) FROM memory_claim_tags WHERE claim_id = memory_claims.id), '') AS tags
        FROM memory_claims
@@ -368,7 +369,7 @@ async function listAdminClaims(env: Env, filters: ClaimListFilters): Promise<{ p
 
 async function getAdminClaimDetail(env: Env, claimId: string): Promise<{ claim: AdminClaimRow; evidence: ClaimEvidenceRow[]; tags: string[]; audit: ClaimAuditRow[] } | null> {
   const claim = await env.DB.prepare(
-    `SELECT id, project_id, scope_kind, scope_id, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, use_count, last_used_at, created_at, updated_at,
+    `SELECT id, project_id, scope_kind, scope_id, category, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, applicability, workspace_id, use_count, last_used_at, created_at, updated_at,
      COALESCE((SELECT GROUP_CONCAT(DISTINCT json_extract(s.metadata_json, '$.source_app')) FROM memory_evidence AS e JOIN memory_segments AS s ON s.id = e.segment_id AND s.project_id = e.project_id WHERE e.claim_id = memory_claims.id AND json_extract(s.metadata_json, '$.source_app') IS NOT NULL), '') AS sources,
      COALESCE((SELECT GROUP_CONCAT(tag) FROM memory_claim_tags WHERE claim_id = memory_claims.id), '') AS tags
      FROM memory_claims WHERE id = ?`,

@@ -40,7 +40,7 @@ Memory Claims
 | :--- | :--- | :--- | :--- | :--- |
 | **`rule`**<br>(全局准则) | `global` | 跨所有项目必须严格遵守的**通用硬性红线与工作哲学**。<br>特征：必须包含强规范动词（`必须`、`严禁`、`优先`、`默认`）。 | **正例**：“必须始终使用中文回复，严禁夹杂英文表达”、“严禁直接在 master 开发，必须在 dev 分支开发并测试”<br>**反例**：“夸克转存到来自：分享”（属于工具/项目特化，严禁进 global） | **全端注入（最高优先级）**<br>上限严格控制在 5~8 条（< 150 Token），作为全局 Base System Instructions。 |
 | **`rule`**<br>(项目特化准则) | `workspace` | 仅在**特定代码仓库或项目环境**下生效的开发规范。 | **正例**：“在 whisper 仓库中，日志严禁打印用户 content，只保留元数据”<br>**反例**：“git commit 必须简洁”（属于 global 规则） | **仅在对应 Workspace 注入**<br>根据 `workspace_id`（路径哈希）隔离，切到其他仓库时不注入。 |
-| **`tool_insight`**<br>(工具经验) | `tool` | 针对特定工具、脚本、第三方 API、网盘或系统的**具体参数、真实路径与避坑经验**。 | **正例**：“quark-save 目标目录名为‘来自：分享’，含全角冒号”、“alipan-save token 为 .bub/alipan-save/token.json”<br>**反例**：“今天天气真好” | **Tool/Skill 触发时动态挂载**<br>日常对话与全局 Prompt 绝不注入；仅当 Agent 激活对应 Tool/Skill 时，动态挂载该工具的专属规范。 |
+| **`tool_insight`**<br>(工具经验) | `scope_id=tool` | 针对特定工具、脚本、第三方 API、网盘或系统的**具体参数、真实路径与避坑经验**。 | **正例**：“quark-save 目标目录名为‘来自：分享’，含全角冒号”、“alipan-save token 为 .bub/alipan-save/token.json”<br>**反例**：“今天天气真好” | **Tool/Skill 触发时动态挂载**<br>日常对话与全局 Prompt 绝不注入；仅当 Agent 激活对应 Tool/Skill 时，动态挂载该工具的专属规范。 |
 | **`user_profile`**<br>(用户画像) | `global` | 用户的技术背景、工作哲学、系统环境等**长期稳定属性**。 | **正例**：“Andy 熟悉 Rust/Go/Python，重视长期架构质量 Slow is Fast”<br>**反例**：“我今天想学一下 Rust”（短期临时状态） | **SessionStart 摘要注入**<br>注入浓缩后的 Profile 摘要（1~2 句话），不平铺细碎条目。 |
 | **`domain_fact`**<br>(业务/架构事实) | `workspace` / `global` | 仓库架构、数据库名、服务端点、业务历史决策等**事实性知识**。 | **正例**：“cf-mem 对应 D1 数据库为 cf-text，域名为 mem.example.com”<br>**反例**：“编译报了个语法错误”（瞬时报错） | **纯按需语义召回 (On-demand RAG)**<br>全局 Prompt 绝不注入；仅当用户 Query 命中向量相似度时，Top-K 召回。 |
 | **`task_state`**<br>(临时工作状态) | `workspace` | 跨轮次、跨会话未完成的断点、TODO、进行中的重构目标。 | **正例**：“whisper 的 memory consolidation spec 已编写完毕，等待接入 Worker”<br>**反例**：“已完成日记清理”（已结束的事实转为 fact 或归档） | **仅在 Resume / Handoff 时注入**<br>新任务不注入；带有 24~72 小时 TTL，过期自动作废。 |
@@ -74,7 +74,7 @@ matcher == compact   startup / resume                       │
                                          ▼
                    1. 从 cf-mem 拉取 active 状态的 rule (global + current workspace)
                    2. 构造 <system-reminder> 注入当前轮上下文尾部
-                   3. 计数器归零: turn_count = 0, accum_tokens = 0
+                   3. ingest 与 context 请求都成功后计数器归零: turn_count = 0, accum_tokens = 0, refresh_pending = false；若 ingest 失败，即使 context 请求成功也保留 refresh_pending
 ```
 
 ### 3.2 刷新触发准则
@@ -107,11 +107,14 @@ matcher == compact   startup / resume                       │
 [Proposed] ──(Extractor/Verifier 确认)──> [Active]
                                               │
                ┌──────────────────────────────┼──────────────────────────────┐
-               │ (语义相似且参数冲突)          │ (60天无访问/活跃分跌破阈值)    │ (用户显式纠偏/删除)
+               │ (语义相似且参数冲突)          │ (后续 retirement 扩展)          │ (用户显式纠偏/删除)
                ▼                              ▼                              ▼
-          [Superseded]                   [Archived]                     [Retracted]
+          [Superseded]                   [Archived]*                    [Retracted]
       (由新版本 claim 替换)            (移出活跃向量库，冷存)           (全端立即停用)
 ```
+
+`*` `archived` 是后续 retirement 扩展的目标状态，不属于本次交付；本次只计算并暴露
+`ActiveScore`，不改变现有状态枚举或自动删除 Vectorize 向量。
 
 ### 4.2 动态衰减评分公式（Active Score）
 
@@ -125,8 +128,10 @@ matcher == compact   startup / resume                       │
 - **\$\text{use\_count}\$**：该条记忆被召回并实际采纳的累计次数。
 
 #### 淘汰策略（Retirement）：
-- 当 \$\text{ActiveScore} < \text{THRESHOLD}\$ 时，状态自动转为 `archived`。
-- `archived` 状态的条目会从 Vectorize 活跃索引中移除，不再参与日常快速召回，仅保留在 D1 存储中供深度审计与全量搜索检索。
+- 目标行为是当 \$\text{ActiveScore} < \text{THRESHOLD}\$ 时转为 `archived`，并从 Vectorize
+  活跃索引中移除，仅保留在 D1 中供审计与全量搜索使用。
+- 本次交付规格只要求计算 `ActiveScore`；由于现有状态枚举没有 `archived`，自动淘汰与向量清理
+  延后到单独的迁移和生命周期任务中实现。
 
 ### 4.3 冲突版本替换（Superseding）
 
@@ -146,7 +151,7 @@ matcher == compact   startup / resume                       │
 在 D1 数据库 `memory_claims` 表中补充字段定义：
 
 ```sql
-ALTER TABLE memory_claims ADD COLUMN category TEXT NOT NULL DEFAULT domain_fact;
+ALTER TABLE memory_claims ADD COLUMN category TEXT NOT NULL DEFAULT 'domain_fact';
 -- 可选值: rule, tool_insight, user_profile, domain_fact, task_state
 
 CREATE INDEX idx_claims_category_scope_status ON memory_claims(project_id, category, scope_kind, status);
@@ -161,7 +166,7 @@ Content-Type: application/json
 {
   "text": "用户对话内容...",
   "source_app": "codex",
-  "external_session_id": "codex:019c...",
+  "external_session_id": "019c...",
   "workspace_id": "ws_whisper_7e939a",
   "workspace_name": "whisper"
 }
@@ -194,7 +199,7 @@ Content-Type: application/json
 - **`UserPromptSubmit` (hook-capture)**：
   - 异步将用户 Prompt 投递至 `POST /memory/profile/ingest` 缓冲池；
   - 维护本地滑窗计数（`turn_count += 1`，累加 Token）；
-  - 命中 `turn_count >= 32` OR `accum_tokens >= 256k` 时，附加 `<system-reminder>` 刷新规则并归零。
+  - 命中 `turn_count >= 32` OR `accum_tokens >= 256k` 时，附加 `<system-reminder>` 刷新规则；只有 ingest 与 context 请求都成功才归零，否则保留 `refresh_pending` 并在后续 Prompt 重试。
 
 ### 6.2 Whisper Bot 运行时
 - **日常对话**：不加载全部工具知识；
@@ -229,10 +234,10 @@ def _resolve_workspace_info() -> tuple[str, str] | None:
 
 ```markdown
 # 抽取器输入元数据
-Current Workspace: whisper (Repo Path: /home/andy/repos/whisper)
+Current Workspace: whisper (Workspace ID: ws_whisper_7e939a)
 
 # 抽取器 Prompt 防泛化负向指令：
 1. 必须优先结合当前 Workspace 项目上下文判断规则边界。
-2. 凡是涉及特定项目代码、特定仓库脚本、本地特定工具参数或目录路径的偏好（如特定网盘文件夹名、特定 API Token 路径、特定组件规范），**必须将 applicability 标记为 "workspace" 或 "tool"，严禁标记为 "global"**。
+2. 凡是涉及特定项目代码、特定仓库脚本、本地特定工具参数或目录路径的偏好（如特定网盘文件夹名、特定 API Token 路径、特定组件规范），**必须标记为 category "tool_insight" 并填写对应 tool 的 scope_id，或标记为 applicability "workspace"，严禁标记为 "global"**。
 3. 只有跨越所有软件工程项目通用的底层原则（如“必须使用中文回复”、“严格在 dev 分支开发”），才允许标记为 "global"。
 ```

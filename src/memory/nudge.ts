@@ -2,7 +2,9 @@ import { fetchByIds } from "../db/d1";
 import type { StoredMemoryRow } from "./schema";
 import type { Env } from "../env";
 import type { ProjectScope } from "../project";
+import { chunkArray } from "../utils";
 import { createExtractionJob, isWebReferenceRow } from "./profile";
+import { normalizeExternalSessionId } from "./session";
 
 // Nudge sweep: segments written via POST /memory/index never enter the
 // durable-memory extraction pipeline on their own — only /memory/profile/ingest
@@ -21,6 +23,11 @@ const DEFAULT_MAX_SEGMENTS_PER_TICK = 48;
 // After this many failed extraction attempts a segment is abandoned: repeated
 // LLM outages must not wedge the same rows into every future tick.
 const MAX_FAILED_ATTEMPTS = 3;
+// Keep nudge-created jobs within the same evidence limits used by the profile
+// extractor. A cron tick may scan more rows, but one job must never silently
+// lose its tail when boundedEvidenceText applies its character budget.
+const MAX_EVIDENCE_SEGMENTS_PER_JOB = 24;
+const MAX_EVIDENCE_CHARS_PER_JOB = 12_000;
 
 export interface NudgeScanResult {
   scanned: number;
@@ -75,6 +82,27 @@ function groupKeyId(key: SegmentGroupKey): string {
   return [key.projectId, key.ownerId, key.sourceApp, key.sessionId, key.workspaceId].join("|");
 }
 
+function segmentCharCount(row: StoredMemoryRow | undefined): number {
+  return typeof row?.text === "string" ? row.text.length : 0;
+}
+
+function takeEvidenceBatch(ids: string[], resolved: ReadonlyMap<string, StoredMemoryRow>): string[] {
+  const batch: string[] = [];
+  let chars = 0;
+  for (const id of ids) {
+    if (batch.length >= MAX_EVIDENCE_SEGMENTS_PER_JOB) break;
+    const nextChars = segmentCharCount(resolved.get(id));
+    if (nextChars > MAX_EVIDENCE_CHARS_PER_JOB) {
+      if (batch.length === 0) return [];
+      break;
+    }
+    if (batch.length > 0 && chars + nextChars > MAX_EVIDENCE_CHARS_PER_JOB) break;
+    batch.push(id);
+    chars += nextChars;
+  }
+  return batch;
+}
+
 /**
  * One nudge pass over unextracted user segments. Returns how many extraction
  * jobs were created and how many segments were marked. Designed for the cron
@@ -91,7 +119,8 @@ export async function runNudgeExtractionScan(env: Env): Promise<NudgeScanResult>
        AND extracted_at IS NULL
        AND extract_failed_count < ${MAX_FAILED_ATTEMPTS}
        AND created_at <= ?
-       AND metadata_json LIKE '%"kind":"user"%'
+       AND json_valid(metadata_json) = 1
+       AND json_extract(metadata_json, '$.kind') = 'user'
      ORDER BY created_at ASC
      LIMIT ?`,
   ).bind(now - minAgeMs, maxSegments).all<NudgeCandidateRow>();
@@ -128,43 +157,48 @@ export async function runNudgeExtractionScan(env: Env): Promise<NudgeScanResult>
   }
 
   let jobs = 0;
-  const markedIds: string[] = [];
+  let markedSegments = 0;
   for (const { key, ids } of groups.values()) {
     // Ingest stores session_id as `${sourceApp}:${externalSessionId}`; keep the
     // same shape so extraction lineage stays comparable across both paths.
-    const colonIndex = key.sessionId.indexOf(":");
-    const externalSessionId = colonIndex >= 0
-      ? key.sessionId.slice(colonIndex + 1)
-      : key.sessionId;
+    const externalSessionId = normalizeExternalSessionId(key.sourceApp, key.sessionId) || "nudge";
     try {
-      await createExtractionJob(env, key.projectId, {
-        evidenceSegmentIds: ids,
-        ownerId: key.ownerId,
-        sourceApp: key.sourceApp || "unknown",
-        externalSessionId: externalSessionId || "nudge",
-        workspaceId: key.workspaceId || null,
-      });
-      jobs += 1;
-      markedIds.push(...ids);
+      let pendingIds = ids;
+      while (pendingIds.length > 0) {
+        const batchIds = takeEvidenceBatch(pendingIds, resolved);
+        if (batchIds.length === 0) {
+          const oversizedId = pendingIds[0];
+          if (segmentCharCount(resolved.get(oversizedId)) > MAX_EVIDENCE_CHARS_PER_JOB) {
+            await markSegmentExtractionFailed(env, key.projectId, oversizedId);
+            console.warn(`[nudge] skipped oversized segment ${oversizedId} for project ${key.projectId}`);
+            pendingIds = pendingIds.slice(1);
+            continue;
+          }
+          break;
+        }
+        await createExtractionJob(env, key.projectId, {
+          evidenceSegmentIds: batchIds,
+          ownerId: key.ownerId,
+          sourceApp: key.sourceApp || "unknown",
+          externalSessionId: externalSessionId || "nudge",
+          workspaceId: key.workspaceId || null,
+        });
+        jobs += 1;
+        for (const idChunk of chunkArray(batchIds, 50)) {
+          const placeholders = idChunk.map(() => "?").join(",");
+          await env.DB.prepare(
+            `UPDATE memory_segments SET extracted_at = COALESCE(extracted_at, ?) WHERE project_id = ? AND deletion_state = 'active' AND id IN (${placeholders})`,
+          ).bind(now, key.projectId, ...idChunk).run();
+        }
+        markedSegments += batchIds.length;
+        pendingIds = pendingIds.slice(batchIds.length);
+      }
     } catch (error) {
-      console.error(`[nudge] job creation failed for project ${key.projectId}: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`[nudge] job creation or segment marking failed for project ${key.projectId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  // Marking happens after job creation: dying between the two means a
-  // duplicate job at worst (createExtractionJob is idempotent on the evidence
-  // id set), never a lost segment. The reverse order would lose them.
-  if (markedIds.length > 0) {
-    for (let i = 0; i < markedIds.length; i += 50) {
-      const chunk = markedIds.slice(i, i + 50);
-      const placeholders = chunk.map(() => "?").join(",");
-      await env.DB.prepare(
-        `UPDATE memory_segments SET extracted_at = ? WHERE id IN (${placeholders})`,
-      ).bind(now, ...chunk).run();
-    }
-  }
-
-  return { scanned: candidates.results.length, jobs, segments: markedIds.length };
+  return { scanned: candidates.results.length, jobs, segments: markedSegments };
 }
 
 /**
@@ -172,8 +206,8 @@ export async function runNudgeExtractionScan(env: Env): Promise<NudgeScanResult>
  * The job failure path calls this so these segments are retried a bounded
  * number of times instead of every tick forever.
  */
-export async function markSegmentExtractionFailed(env: Env, segmentId: string): Promise<void> {
+export async function markSegmentExtractionFailed(env: Env, projectId: string, segmentId: string): Promise<void> {
   await env.DB.prepare(
-    "UPDATE memory_segments SET extract_failed_count = extract_failed_count + 1 WHERE id = ?",
-  ).bind(segmentId).run();
+    "UPDATE memory_segments SET extract_failed_count = extract_failed_count + 1 WHERE project_id = ? AND id = ?",
+  ).bind(projectId, segmentId).run();
 }

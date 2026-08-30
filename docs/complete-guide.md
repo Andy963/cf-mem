@@ -27,6 +27,7 @@
 - `POST /memory/claims`
 - `POST /memory/profile/ingest`
 - `POST /memory/extraction/ingest`
+- `GET /memory/context`
 - `POST /memory/context`
 - `GET /memory/claims`
 - `POST /memory/forget`
@@ -68,6 +69,7 @@ npx wrangler vectorize create cf-claims --dimensions 1024 --metric cosine
 npx wrangler vectorize create-metadata-index cf-claims --property-name status --type string
 npx wrangler vectorize create-metadata-index cf-claims --property-name scope_kind --type string
 npx wrangler vectorize create-metadata-index cf-claims --property-name scope_id --type string
+npx wrangler vectorize create-metadata-index cf-claims --property-name category --type string
 npx wrangler vectorize create-metadata-index cf-claims --property-name type --type string
 npx wrangler vectorize create-metadata-index cf-claims --property-name workspace_id --type string
 ```
@@ -254,7 +256,9 @@ project only:
 {
   "text": "I prefer concise replies.",
   "source_app": "codex",
-  "external_session_id": "session-123"
+  "external_session_id": "session-123",
+  "workspace_id": "ws_cf-mem_0123456789abcdef",
+  "workspace_name": "cf-mem"
 }
 ```
 
@@ -332,6 +336,11 @@ Buffered evidence lives in `profile_evidence_inbox` and is grouped by
 straddling two unrelated topics, which would otherwise let the extractor attach a `subject` to the
 wrong conversation.
 
+The generic profile extractor reconciliation context includes the current owner's claims and
+project-scoped rules only. `tool_insight` claims are intentionally excluded unless a future caller
+supplies an explicit tool scope, so one tool's operational details cannot influence another tool's
+extraction.
+
 Each Cron tick flushes a group into one or more extraction jobs. A batch is cut when adding the next
 entry **would** exceed a limit, so a batch never overshoots — overshooting past `MAX_EVIDENCE_CHARS`
 (12000) would make `boundedEvidenceText` silently drop the tail of the batch. A batch ships when:
@@ -375,13 +384,18 @@ call `POST /memory/claims` for automated extraction.
 - `kind`（string）
 - `chat_id`（number）
 - `user_id`（number）
+- `category`（string）
+- `workspace_id`（string）
 
-如果你还需要在 Vectorize 侧做 metadata filter，建议创建 metadata index（至少 `project_id` / `session_id` / `tape`）：
+如果你还需要在 Vectorize 侧做 metadata filter，建议创建 metadata index（至少 `project_id` / `session_id` / `tape`
+以及使用的 `category` / `workspace_id`）：
 
 ```bash
 npx wrangler vectorize create-metadata-index cf-vector --property-name project_id --type string
 npx wrangler vectorize create-metadata-index cf-vector --property-name session_id --type string
 npx wrangler vectorize create-metadata-index cf-vector --property-name tape --type string
+npx wrangler vectorize create-metadata-index cf-vector --property-name category --type string
+npx wrangler vectorize create-metadata-index cf-vector --property-name workspace_id --type string
 ```
 
 没有 metadata index 时，带 `filter` 的向量查询召回会不足。此时 `/memory/search` 会补一次
@@ -466,13 +480,14 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
 - `retract`：将指定 active claim 标记为 `retracted`。
 
 除上述身份键查重外，`create` 还会做一层语义去重：无身份匹配时，用新 claim 的
-`canonical_text` 在 `cf-claims` 向量索引中使用精确 cosine 分数召回同 scope、同 type 的候选。
-必须预先为 `status`、`scope_kind`、`scope_id`、`type`、`workspace_id` 建立 metadata index，
+`canonical_text` 在 `cf-claims` 向量索引中使用 Vectorize 返回的相似度分数召回同 scope、同 category、同 type 的候选。
+必须预先为 `status`、`scope_kind`、`scope_id`、`category`、`type`、`workspace_id` 建立 metadata index，
 这样过滤会在 topK 截断前执行。相似度 ≥
 `CLAIM_DEDUP_SAME_SCORE`（默认 `0.92`）视为同义事实，自动转为 reinforce；低于
 `CLAIM_DEDUP_REVIEW_MIN_SCORE`（默认 `0.75`）视为新事实直接插入；之间的灰区交给配置的
 LLM（提取器端点）三选一裁决：`same` 转 reinforce、`update` 按
-`CLAIM_DEDUP_AUTO_REPLACE` 决定是否自动替换（默认关闭，报错提示改用 supersede）、`conflict`
+`CLAIM_DEDUP_AUTO_REPLACE` 决定普通分类的 `update` 是否自动替换（默认关闭，报错提示改用 supersede）；
+`rule` 与 `tool_insight` 的 `update` 或 `conflict` 按分类策略自动 supersede 旧版本，其他分类的 `conflict`
 拒绝写入并提示走显式操作。LLM 不可用时灰区降级为直接插入，宁可暂存可能重复的 claim，也不静默合并。
 `PROFILE_EXTRACTOR_PROTOCOL=responses` 时灰区裁决使用 Responses API；并发写入按 project/scope/type/workspace
 加 D1 lease 锁，避免多个请求同时通过语义检查。Vectorize 写入存在延迟可见窗口时，Worker
@@ -498,9 +513,34 @@ LLM（提取器端点）三选一裁决：`same` 转 reinforce、`update` 按
 }
 ```
 
-`POST /memory/context` 按用户、项目和会话 scope 返回当前有效的 active claims，并包含 source
+`GET /memory/context` 与 `POST /memory/context` 按用户、项目和会话 scope 返回当前有效的 active claims，并包含 source
 segment ids。若传入 `query`，Worker 会把固定 scope 内存与专用 claim 向量索引的语义命中合并。
 它用于 Agent 每轮开始前加载受限、结构化的记忆上下文：
+
+可用 `categories` 选择路由：`rule` 返回全局及当前工作区规则，`tool_insight` 需要同时传入
+工具名称 `scope_id`，`user_profile` 返回当前用户画像，`task_state` 返回当前用户或会话的未过期任务状态，
+`domain_fact` 仅在 query 非空且非 trivial 时执行语义召回。未指定 `categories` 时保持旧版 scope + semantic 合并行为。
+
+对 `domain_fact` 与 `user_profile` claim，响应还会返回 `active_score`。它按置信度、距最近使用的天数
+和 `use_count` 计算，用于观察记忆活跃度；`rule`、`tool_insight` 与 `task_state` 返回 `null`，不参与时间衰减。
+`task_state` claim 必须提供未来的 `valid_until`；过期状态不会被上下文路由返回。
+
+例如，SessionStart 可以只请求全局规则、当前工作区规则和用户画像：
+
+```json
+{
+  "user_id": "user-123",
+  "categories": ["rule", "user_profile"],
+  "workspace_id": "ws_cf-mem_0123456789abcdef",
+  "limit": 15
+}
+```
+
+`POST /memory/search` 的 `categories` 支持逗号分隔字符串或数组；未指定时按
+`domain_fact` 处理。原始 segment 没有分类元数据时按兼容规则视为 `domain_fact`。
+
+未指定 `categories` 的旧版 `/memory/context` 请求仍保留原有 scope 路由，但不会广播
+`tool_insight`；工具经验必须通过显式的 `tool_insight` 分类和 `scope_id` 请求。
 
 ```json
 {
@@ -540,3 +580,7 @@ metadata `user_id` 表达式索引。它是纯索引变更，不改数据，但�
 `{ok, evidence_id, buffered, job_id: null}`——调用方若依赖 `job_id` 立即拿到 job，需要改为
 通过 `GET /memory/claims` 观察最终结果。迁移前已排队的 `profile_extraction_jobs` 不受影响，
 仍会被 Cron 正常消费。
+
+迁移 `0017_memory_taxonomy_and_routing.sql` 为既有 Claim 默认补上 `domain_fact` 分类，并新增分类路由索引；
+已有 Claim 的向量若尚未携带 `category` 元数据，查询时仍会通过 D1 兼容过滤，后续可按项目重新索引以获得完整的
+Vectorize metadata filter 效果。

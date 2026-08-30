@@ -43,7 +43,7 @@ npx wrangler vectorize create cf-claims --dimensions 1024 --metric cosine
 把创建 D1 时返回的 `database_id` 填入本地 `wrangler.toml`，然后创建 Claims 的过滤索引：
 
 ```bash
-for property in status scope_kind scope_id type workspace_id; do
+for property in status scope_kind scope_id category type workspace_id; do
   npx wrangler vectorize create-metadata-index cf-claims \
     --property-name "$property" --type string
 done
@@ -148,6 +148,8 @@ curl -sS \
     "claim": {
       "scope_kind": "user",
       "scope_id": "user-123",
+      "category": "rule",
+      "applicability": "global",
       "type": "preference",
       "subject": "response",
       "memory_key": "response.language",
@@ -160,8 +162,8 @@ curl -sS \
   }'
 ```
 
-Claims 的 `create` 会先检查身份键，再在同一项目、scope、类型和 workspace 内做语义去重。
-相似事实会 reinforce；可能是更新或冲突的内容不会被静默覆盖。完整规则见
+Claims 的 `create` 会先检查身份键，再在同一项目、scope、分类、类型和 workspace 内做语义去重。
+相似事实会 reinforce；`rule` 和 `tool_insight` 的更新或冲突会自动 supersede 旧版本，其他分类仍不会被静默覆盖。完整规则见
 [`docs/durable-memory-design.md`](docs/durable-memory-design.md)。
 
 ## 接口概览
@@ -174,6 +176,7 @@ Claims 的 `create` 会先检查身份键，再在同一项目、scope、类型�
 | `POST /memory/search` | 搜索原始记忆 |
 | `POST /memory/claims` | 创建或变更持久记忆 |
 | `GET /memory/claims` | 查看 Claims |
+| `GET /memory/context` | 获取按分类路由的记忆上下文 |
 | `POST /memory/context` | 获取当前有效记忆上下文 |
 | `POST /memory/profile/ingest` | 提交个人记忆提炼证据 |
 | `POST /memory/extraction/ingest` | 提交已索引证据进行自动提炼 |
@@ -183,6 +186,11 @@ Claims 的 `create` 会先检查身份键，再在同一项目、scope、类型�
 
 `POST /memory/context` 对空输入、斜杠命令和短确认词会跳过语义 embedding 与 Vectorize 查询，
 但仍会返回按 scope 确定性匹配的 Claims。
+
+持久记忆支持 `rule`、`tool_insight`、`user_profile`、`domain_fact` 和 `task_state` 五类。
+`/memory/context` 可通过 `categories`、`workspace_id` 和 `scope_id` 做按需路由；未指定
+`categories` 时保持兼容旧调用，返回原有 scope 内的有效 Claims（不广播新分类的 `tool_insight`）。`/memory/search` 默认只检索
+`domain_fact` 原始段落；需要其他分类时显式传入 `categories`，并确保索引元数据包含对应字段。
 
 所有接口的完整请求格式、限制和返回值见
 [`docs/complete-guide.md`](docs/complete-guide.md)。

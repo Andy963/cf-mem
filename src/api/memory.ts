@@ -93,6 +93,29 @@ export async function handleMemoryRequest(request: Request, env: Env, projectSco
     return jsonResponse(env, { ok: true, project_id: projectScope.projectId, namespace: projectScope.namespace });
   }
 
+  if (method === "GET" && url.pathname === "/memory/context") {
+    try {
+      const context = normalizeContextRequest({
+        user_id: url.searchParams.get("user_id"),
+        session_id: url.searchParams.get("session_id"),
+        query: url.searchParams.get("query"),
+        types: url.searchParams.get("types"),
+        categories: url.searchParams.get("categories"),
+        scope_id: url.searchParams.get("scope_id"),
+        workspace_id: url.searchParams.get("workspace_id"),
+        limit: url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined,
+        profile_only: url.searchParams.get("profile_only") === "true",
+      });
+      const result = await loadMemoryContext(env, projectScope, context);
+      return jsonResponse(env, { ok: true, ...result });
+    } catch (error) {
+      if (error instanceof ClaimSchemaError || error instanceof MemorySchemaError) {
+        return invalidRequestResponse(env, error);
+      }
+      return jsonResponse(env, { error: { message: (error as Error).message } }, { status: 502 });
+    }
+  }
+
   if (method === "GET" && url.pathname === "/memory/claims") {
     try {
       const result = await listDurableMemoryClaims(env.DB, projectScope, parseClaimListOptions(url));

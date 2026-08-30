@@ -115,7 +115,7 @@ OpenAI 兼容的请求格式，因此保持 `chat_completions` 即可，不需�
 `cf-claims` 必须创建以下 metadata index，过滤才会在 topK 截断前生效：
 
 ```bash
-for property in status scope_kind scope_id type workspace_id; do
+for property in status scope_kind scope_id category type workspace_id; do
   npx wrangler vectorize create-metadata-index cf-claims \
     --property-name "$property" --type string
 done

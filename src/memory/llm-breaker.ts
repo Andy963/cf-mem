@@ -67,6 +67,20 @@ async function writeBreakerState(
   ).bind(state.consecutive_failures, state.open_until_at, state.last_error, now).run();
 }
 
+async function writeBreakerStateBestEffort(
+  db: D1Database,
+  state: { consecutive_failures: number; open_until_at: number | null; last_error: string | null },
+  now: number,
+): Promise<void> {
+  try {
+    await writeBreakerState(db, state, now);
+  } catch (error) {
+    // Breaker persistence is telemetry and coordination state. It must never
+    // replace a successful provider result or the provider's original error.
+    console.error(`[llm-breaker] failed to persist state: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 // Classifies an error for the breaker. Network failures, timeouts, HTTP 5xx
 // and 429 count; HTTP 4xx from our own bad request (400/401/403/422) does NOT
 // — retrying those against a healthy provider would be pointless, but opening
@@ -98,7 +112,7 @@ export async function withBreaker<T>(env: Env, call: () => Promise<T>): Promise<
   try {
     const result = await call();
     if (state.consecutive_failures > 0 || state.open_until_at !== null) {
-      await writeBreakerState(env.DB, { consecutive_failures: 0, open_until_at: null, last_error: null }, Date.now());
+      await writeBreakerStateBestEffort(env.DB, { consecutive_failures: 0, open_until_at: null, last_error: null }, Date.now());
     }
     return result;
   } catch (error) {
@@ -106,7 +120,7 @@ export async function withBreaker<T>(env: Env, call: () => Promise<T>): Promise<
     if (!failure) throw error;
     const failures = state.consecutive_failures + 1;
     const open_until_at = failures >= DEFAULT_OPEN_THRESHOLD ? Date.now() + DEFAULT_OPEN_MS : null;
-    await writeBreakerState(
+    await writeBreakerStateBestEffort(
       env.DB,
       {
         consecutive_failures: failures,

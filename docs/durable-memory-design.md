@@ -41,12 +41,15 @@
 | `id` | 稳定的 claim 标识符 |
 | `project_id` | 强制隔离键 |
 | `scope_kind`, `scope_id` | 归属 scope：`project`、`user` 或 `session` |
+| `category` | `rule`、`tool_insight`、`user_profile`、`domain_fact` 或 `task_state` |
 | `type` | `preference`、`instruction`、`decision`、`profile` 或 `task_state` |
 | `subject`, `memory_key` | 用于合并的规范身份键 |
 | `value_json`, `canonical_text` | 机器可读的值 + Agent 可读的文本 |
 | `status` | `active`、`superseded`、`retracted` 或 `proposed` |
 | `provenance` | `user_explicit`、`user_confirmed` 或 `model_inferred` |
 | `confidence` | `[0, 1]` 内的数值 |
+| `applicability` | `global`、`workspace` 或 `semantic` |
+| `workspace_id` | 工作区适用范围；仅用于 `applicability = workspace` |
 | `superseded_by` | 替代它的 claim id（如有） |
 | `use_count` | claim 被注入上下文的累计次数 |
 | `last_used_at` | claim 最近一次被注入上下文的时间 |
@@ -63,15 +66,33 @@ claim 对 claim 的替换用 `memory_claims.superseded_by` 表示。证据关联
 2. `user_explicit` 和 `user_confirmed` 的 claim 必须至少有一条支撑 segment。
 3. `model_inferred` 的 claim 创建时必须是 `proposed` 状态；未经显式确认，永远不会作为
    active 用户记忆返回。
-4. 同一 (project, scope, type, subject, memory_key) 组合下最多只有一条 active claim。
+4. 同一 (project, scope, category, type, subject, memory_key, workspace) 组合下最多只有一条 active claim。
 5. 替换会创建新 claim 并把旧 active claim 标为 `superseded`；历史 claim 永不覆写。
 6. 撤回把状态改为 `retracted`，但保留完整证据链。
-7. 语义去重只比较同项目、同 scope、同 type、同 workspace 的 active 且当前有效的 claim。
+7. 语义去重只比较同项目、同 scope、同 category、同 type、同 workspace 的 active 且当前有效的 claim。
    Vectorize 结果先用 metadata 过滤收窄，状态与有效性的最终裁决权始终在 D1。
 8. 处于 Vectorize 最终一致性的可见窗口内时，做 create 决策前会把向量结果中缺失的
    same-scope active claims 从 D1 重新嵌入补齐。
 9. 语义上的「读取 → 裁决 → 写入」序列由短期的 D1 租约锁（lease lock）保护，
    防止并发请求插入重复的语义 claim。
+
+## 分类路由与生命周期
+
+Claims 按五类路由：`rule` 用于全局或工作区行为约束，`tool_insight` 按工具名称
+（`scope_id`）局部挂载，`user_profile` 用于用户画像，`domain_fact` 只在有实际查询时做语义召回，
+`task_state` 只返回当前 scope 内且未过期的任务断点。
+
+`domain_fact` 与 `user_profile` 的响应包含动态 `active_score`：
+
+`confidence * exp(-0.023 * deltaDays) * (1 + ln(1 + use_count))`
+
+其中 `deltaDays` 从 `last_used_at`（没有使用记录时回退到 `created_at`）计算。当前实现将该值
+作为召回与审计指标返回，未增加 `archived` 状态或自动归档迁移；现有状态机仍只有
+`active`、`superseded`、`retracted` 和 `proposed`。`task_state` 必须带有未来的 `valid_until`，
+上下文查询会过滤已过期状态。
+
+同一分类和语义 scope 内，`rule` 与 `tool_insight` 的参数更新或冲突会自动创建新版本并将旧版本
+标记为 `superseded`；其他分类仍需显式允许替换或在冲突时停止，避免静默覆盖事实。
 
 ## API 契约
 
@@ -90,10 +111,14 @@ claim 对 claim 的替换用 `memory_claims.superseded_by` 表示。证据关联
 `POST /memory/extraction/ingest`，候选提取、验证和自动变更 claim 都由 Worker 负责。
 `POST /memory/claims` 只保留给显式授权的管理操作。
 
-### `POST /memory/context`
+### `GET /memory/context` 与 `POST /memory/context`
 
 按 scope 与时间确定性排序，返回生效中的非 proposed claims 及其支撑 segment ids。
 它面向每轮对话前的上下文加载器。
+
+传入 `categories` 后，Worker 按分类路由：规则查询全局及当前工作区，工具经验需要 `scope_id`，
+用户画像按用户 scope 查询，业务事实只在 query 非空且非 trivial 时使用 claim 向量索引，
+任务状态只返回当前用户或会话的未过期记录。未传 `categories` 时保持旧版 scope 与语义合并行为。
 
 初始选择是结构化的，不是语义的：
 

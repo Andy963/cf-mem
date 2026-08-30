@@ -1,21 +1,52 @@
 import type { ProjectScope } from "../project";
 import { clampInt } from "../utils";
 
+export const CLAIM_CATEGORIES = ["rule", "tool_insight", "user_profile", "domain_fact", "task_state"] as const;
 export const CLAIM_TYPES = ["preference", "instruction", "decision", "profile", "task_state"] as const;
 export const CLAIM_STATUSES = ["active", "superseded", "retracted", "proposed"] as const;
 export const CLAIM_PROVENANCES = ["user_explicit", "user_confirmed", "model_inferred"] as const;
 export const SCOPE_KINDS = ["project", "user", "session"] as const;
 export const CLAIM_APPLICABILITIES = ["global", "semantic", "workspace"] as const;
 
+export type ClaimCategory = (typeof CLAIM_CATEGORIES)[number];
 export type ClaimType = (typeof CLAIM_TYPES)[number];
 export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
 export type ClaimProvenance = (typeof CLAIM_PROVENANCES)[number];
 export type ScopeKind = (typeof SCOPE_KINDS)[number];
 export type ClaimApplicability = (typeof CLAIM_APPLICABILITIES)[number];
 
+export function inferClaimCategory(
+  type: ClaimType,
+  applicability: ClaimApplicability | undefined,
+  workspaceId: string | null,
+): ClaimCategory {
+  if (type === "task_state") return "task_state";
+  if (type === "profile") return "user_profile";
+  if (
+    type === "instruction"
+    || (type === "preference" && (
+      applicability === "global"
+      || applicability === "workspace"
+      || (applicability === undefined && workspaceId !== null)
+    ))
+  ) {
+    return "rule";
+  }
+  return "domain_fact";
+}
+
+export function defaultClaimApplicability(category: ClaimCategory, workspaceId: string | null): ClaimApplicability {
+  if (category === "user_profile") return "global";
+  if (category === "task_state") return "workspace";
+  if (workspaceId && category !== "tool_insight") return "workspace";
+  if (category === "rule") return "global";
+  return "semantic";
+}
+
 export interface ClaimInput {
   scopeKind: ScopeKind;
   scopeId: string;
+  category: ClaimCategory;
   type: ClaimType;
   subject: string;
   memoryKey: string;
@@ -40,6 +71,8 @@ export interface ContextRequest {
   sessionId: string | null;
   query: string | null;
   types: ClaimType[] | null;
+  categories: ClaimCategory[] | null;
+  scopeId: string | null;
   limit: number;
   workspaceId: string | null;
   profileOnly: boolean;
@@ -49,6 +82,46 @@ export class ClaimSchemaError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ClaimSchemaError";
+  }
+}
+
+export function validateClaimTaxonomy(
+  category: ClaimCategory,
+  type: ClaimType,
+  applicability: ClaimApplicability,
+  workspaceId: string | null,
+): void {
+  if (type === "task_state" || category === "task_state") {
+    if (type !== "task_state" || category !== "task_state") {
+      throw new ClaimSchemaError("task_state claims must use the task_state category and type");
+    }
+    if (applicability !== "workspace") {
+      throw new ClaimSchemaError("task_state claims must use workspace applicability");
+    }
+  }
+  if (type === "profile" && category !== "user_profile") {
+    throw new ClaimSchemaError("profile claims must use the user_profile category");
+  }
+  if (category === "user_profile" && type !== "profile" && type !== "preference") {
+    throw new ClaimSchemaError("user_profile claims must use profile or preference type");
+  }
+  if (category === "tool_insight" && type === "profile") {
+    throw new ClaimSchemaError("tool_insight claims cannot use profile type");
+  }
+  if (category === "rule" && applicability === "semantic") {
+    throw new ClaimSchemaError("rule claims must use global or workspace applicability");
+  }
+  if (category === "user_profile" && applicability !== "global") {
+    throw new ClaimSchemaError("user_profile claims must use global applicability");
+  }
+  if (category === "tool_insight" && applicability === "global") {
+    throw new ClaimSchemaError("tool_insight claims cannot have global applicability");
+  }
+  if (applicability === "workspace" && !workspaceId) {
+    throw new ClaimSchemaError("claim.workspace_id is required for workspace applicability");
+  }
+  if (applicability !== "workspace" && workspaceId !== null) {
+    throw new ClaimSchemaError("claim.workspace_id is only valid for workspace applicability");
   }
 }
 
@@ -122,24 +195,29 @@ function parseClaim(value: unknown, projectScope: ProjectScope): ClaimInput {
     throw new ClaimSchemaError("project claim scope_id must match the authenticated project");
   }
 
+  const type = asEnum(value.type, CLAIM_TYPES, "claim.type");
   const provenance = asEnum(value.provenance, CLAIM_PROVENANCES, "claim.provenance");
   const evidenceSegmentIds = asSegmentIds(value.evidence_segment_ids, provenance !== "model_inferred");
   const validFrom = asOptionalTimestamp(value.valid_from, "claim.valid_from");
   const validUntil = asOptionalTimestamp(value.valid_until, "claim.valid_until");
-  const applicability = value.applicability === undefined
-    ? "semantic"
-    : asEnum(value.applicability, CLAIM_APPLICABILITIES, "claim.applicability");
   const workspaceId = value.workspace_id === undefined || value.workspace_id === null
     ? null
     : asText(value.workspace_id, "claim.workspace_id", 256);
-  if (applicability === "workspace" && !workspaceId) {
-    throw new ClaimSchemaError("claim.workspace_id is required for workspace applicability");
-  }
-  if (applicability !== "workspace" && workspaceId !== null) {
-    throw new ClaimSchemaError("claim.workspace_id is only valid for workspace applicability");
-  }
-  if (applicability === "global" && value.type !== "preference") {
-    throw new ClaimSchemaError("only preference claims may have global applicability");
+
+  const requestedCategory = value.category === undefined || value.category === null
+    ? null
+    : asEnum(value.category, CLAIM_CATEGORIES, "claim.category");
+  const requestedApplicability = value.applicability === undefined
+    ? undefined
+    : asEnum(value.applicability, CLAIM_APPLICABILITIES, "claim.applicability");
+  const category = requestedCategory ?? inferClaimCategory(type, requestedApplicability, workspaceId);
+  const applicability = requestedApplicability === undefined
+    ? defaultClaimApplicability(category, workspaceId)
+    : requestedApplicability;
+  const resolvedCategory = requestedCategory ?? inferClaimCategory(type, applicability, workspaceId);
+  validateClaimTaxonomy(resolvedCategory, type, applicability, workspaceId);
+  if (resolvedCategory === "task_state" && (validUntil === null || validUntil <= Date.now())) {
+    throw new ClaimSchemaError("task_state claims require a future valid_until timestamp");
   }
   if (validFrom !== null && validUntil !== null && validUntil < validFrom) {
     throw new ClaimSchemaError("claim.valid_until must be after claim.valid_from");
@@ -148,7 +226,8 @@ function parseClaim(value: unknown, projectScope: ProjectScope): ClaimInput {
   return {
     scopeKind,
     scopeId,
-    type: asEnum(value.type, CLAIM_TYPES, "claim.type"),
+    category: resolvedCategory,
+    type,
     subject: asText(value.subject, "claim.subject", 256),
     memoryKey: asText(value.memory_key, "claim.memory_key", 256),
     value: asJsonValue(value.value),
@@ -219,33 +298,63 @@ export function isTrivialPrompt(text: string | null | undefined): boolean {
   return TRIVIAL_PROMPT_RE.test(stripped);
 }
 
+export function normalizeClaimCategoryList(value: unknown): ClaimCategory[] | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string") {
+    const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0) return null;
+    return [...new Set(parts.map((item) => asEnum(item, CLAIM_CATEGORIES, "categories")))];
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    return [...new Set(value.map((item) => asEnum(item, CLAIM_CATEGORIES, "categories[]")))];
+  }
+  throw new ClaimSchemaError("categories must be an array or comma-separated string");
+}
+
+function parseTypeList(value: unknown): ClaimType[] | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string") {
+    const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0) return null;
+    return [...new Set(parts.map((item) => asEnum(item, CLAIM_TYPES, "types")))];
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    return [...new Set(value.map((item) => asEnum(item, CLAIM_TYPES, "types[]")))];
+  }
+  throw new ClaimSchemaError("types must be an array or comma-separated string");
+}
+
 export function normalizeContextRequest(body: unknown): ContextRequest {
   if (body === undefined || body === null) {
-    return { userId: null, sessionId: null, query: null, types: null, limit: 20, workspaceId: null, profileOnly: false };
+    return { userId: null, sessionId: null, query: null, types: null, categories: null, scopeId: null, limit: 20, workspaceId: null, profileOnly: false };
   }
   if (!isRecord(body)) throw new ClaimSchemaError("Request body must be an object");
 
-  const rawTypes = body.types;
-  let types: ClaimType[] | null = null;
-  if (rawTypes !== undefined) {
-    if (!Array.isArray(rawTypes)) throw new ClaimSchemaError("types must be an array");
-    types = [...new Set(rawTypes.map((value) => asEnum(value, CLAIM_TYPES, "types[]")))];
-  }
+  const types = parseTypeList(body.types);
+  const categories = normalizeClaimCategoryList(body.categories ?? body.category);
 
-  if (body.limit !== undefined && typeof body.limit !== "number") {
-    throw new ClaimSchemaError("limit must be a number");
+  let limit = 20;
+  if (body.limit !== undefined && body.limit !== null) {
+    const rawLimit = typeof body.limit === "string" ? Number(body.limit) : body.limit;
+    if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || !Number.isInteger(rawLimit)) {
+      throw new ClaimSchemaError("limit must be a number");
+    }
+    limit = clampInt(rawLimit, 1, 100);
   }
-  const limit = body.limit === undefined ? 20 : clampInt(body.limit as number, 1, 100);
 
   return {
-    userId: body.user_id === undefined ? null : asText(body.user_id, "user_id", 256),
-    sessionId: body.session_id === undefined ? null : asText(body.session_id, "session_id", 256),
-    query: body.query === undefined ? null : asText(body.query, "query", 4000),
+    userId: body.user_id === undefined || body.user_id === null ? null : asText(body.user_id, "user_id", 256),
+    sessionId: body.session_id === undefined || body.session_id === null ? null : asText(body.session_id, "session_id", 256),
+    query: body.query === undefined || body.query === null ? null : asText(body.query, "query", 4000),
     types,
+    categories,
+    scopeId: body.scope_id === undefined || body.scope_id === null ? null : asText(body.scope_id, "scope_id", 256),
     limit,
     workspaceId: body.workspace_id === undefined || body.workspace_id === null
       ? null
       : asText(body.workspace_id, "workspace_id", 256),
-    profileOnly: body.profile_only === true,
+    profileOnly: body.profile_only === true || body.profile_only === "true",
   };
 }

@@ -1,4 +1,5 @@
 import type { Primitive } from "../env";
+import { normalizeClaimCategoryList, type ClaimCategory } from "./claims";
 import {
   availableSegmentIdBytes,
   MAX_VECTOR_ID_BYTES,
@@ -28,6 +29,7 @@ export interface SearchRequestInput {
   query: string;
   topK?: number;
   filter?: Record<string, Primitive>;
+  categories?: ClaimCategory[];
 }
 
 export interface PreparedIndexItem {
@@ -127,7 +129,7 @@ function buildVectorMetadata(metadata?: Record<string, unknown>): Record<string,
   if (!metadata) return undefined;
 
   const projected: Record<string, Primitive> = {};
-  for (const key of ["project_id", "session_id", "tape", "kind", "chat_id", "user_id"]) {
+  for (const key of ["project_id", "session_id", "tape", "kind", "chat_id", "user_id", "category", "workspace_id"]) {
     const value = metadata[key];
     if (typeof value === "string" && value) projected[key] = value;
     if (typeof value === "number" && Number.isFinite(value)) projected[key] = value;
@@ -242,17 +244,46 @@ export const defaultMemorySchema: MemoryShapeAdapter = {
     const record = body as Record<string, unknown>;
     if (typeof record.query !== "string") return null;
 
-    const topK = typeof record.topK === "number" ? record.topK : undefined;
-    const rawFilter = record.filter && typeof record.filter === "object" && !Array.isArray(record.filter)
-      ? (record.filter as Record<string, Primitive>)
-      : undefined;
+    const rawTopK = record.topK ?? record.top_k;
+    const topK = typeof rawTopK === "number" ? rawTopK : undefined;
+    const rawFilter: Record<string, Primitive> = record.filter && typeof record.filter === "object" && !Array.isArray(record.filter)
+      ? { ...(record.filter as Record<string, Primitive>) }
+      : {};
+
+    if (record.workspace_id !== undefined && record.workspace_id !== null) {
+      if (typeof record.workspace_id !== "string" || !record.workspace_id.trim()) {
+        throw new MemorySchemaError("workspace_id must be a non-empty string");
+      }
+      const workspaceId = record.workspace_id.trim();
+      if (rawFilter.workspace_id !== undefined && rawFilter.workspace_id !== workspaceId) {
+        throw new MemorySchemaError("workspace_id conflicts with filter.workspace_id");
+      }
+      rawFilter.workspace_id = workspaceId;
+    }
+    let categories: ClaimCategory[] | undefined;
+    try {
+      const requestedCategories = record.categories !== undefined
+        ? record.categories
+        : record.category !== undefined
+          ? record.category
+          : rawFilter.category;
+      categories = normalizeClaimCategoryList(requestedCategories) ?? ["domain_fact"];
+    } catch (error) {
+      throw new MemorySchemaError(error instanceof Error ? error.message : "categories are invalid");
+    }
+    if (categories.length === 1) {
+      rawFilter.category = categories[0];
+    } else {
+      delete rawFilter.category;
+    }
 
     return {
       projectId: projectScope.projectId,
       namespace: projectScope.namespace,
       query: record.query,
       topK,
-      filter: sanitizeFilter(rawFilter, projectScope.projectId),
+      filter: sanitizeFilter(Object.keys(rawFilter).length > 0 ? rawFilter : undefined, projectScope.projectId),
+      categories,
     };
   },
 
@@ -292,7 +323,7 @@ export const defaultMemorySchema: MemoryShapeAdapter = {
 
   getCandidateTopK(request: SearchRequestInput): number {
     const requestedTopK = clampInt(request.topK ?? 5, 1, 50);
-    return request.filter
+    return request.filter || (request.categories && request.categories.length > 0)
       ? clampInt(requestedTopK * FILTERED_CANDIDATE_MULTIPLIER, requestedTopK, MAX_VECTOR_QUERY_TOP_K)
       : requestedTopK;
   },
@@ -309,6 +340,12 @@ export const defaultMemorySchema: MemoryShapeAdapter = {
       return false;
     }
 
+    if (request.categories && request.categories.length > 0) {
+      const rawCategory = getByPath(metadata, "category");
+      const category = typeof rawCategory === "string" && rawCategory.trim() ? rawCategory : "domain_fact";
+      if (!request.categories.includes(category as ClaimCategory)) return false;
+    }
+
     if (!request.filter) return true;
 
     for (const [key, expected] of Object.entries(request.filter)) {
@@ -316,6 +353,10 @@ export const defaultMemorySchema: MemoryShapeAdapter = {
       if (key === "session_id") actual = row?.session_id;
       else if (key === "tape") actual = row?.tape;
       else if (key === "project_id") actual = row?.project_id;
+      else if (key === "category") {
+        const rawCategory = getByPath(metadata, key);
+        actual = typeof rawCategory === "string" && rawCategory.trim() ? rawCategory : "domain_fact";
+      }
       else actual = getByPath(metadata, key);
 
       if (!matchesPrimitive(actual, expected)) return false;

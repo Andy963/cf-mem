@@ -173,7 +173,7 @@ function restoreVectorMetadata(metadataJson: unknown): Record<string, Primitive>
   try {
     const metadata = JSON.parse(metadataJson) as Record<string, unknown>;
     const projected: Record<string, Primitive> = {};
-    for (const key of ["project_id", "session_id", "tape", "kind", "chat_id", "user_id"]) {
+    for (const key of ["project_id", "session_id", "tape", "kind", "chat_id", "user_id", "category", "workspace_id"]) {
       const value = metadata[key];
       if (typeof value === "string" && value) projected[key] = value;
       if (typeof value === "number" && Number.isFinite(value)) projected[key] = value;
