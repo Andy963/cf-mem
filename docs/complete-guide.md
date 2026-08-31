@@ -290,7 +290,17 @@ assignments) and skips replies under 80 characters, which are acknowledgements r
 
 The workspace resolver no longer returns nothing for a directory without a `.git`,
 `package.json`, or `pyproject.toml` marker: it falls back to the directory itself, so extracted
-facts always carry a project identity.
+facts carry a project identity. Two exclusions apply even when a marker is present — a stray
+`/tmp/.git` is enough to make every temp session look like one shared repository:
+
+- `/` and `$HOME` are matched **exactly**. `/` is every path's ancestor and `$HOME` is where real
+  projects live, so testing either by ancestry would disqualify `~/repos/<project>` too.
+- The temp roots (`/tmp`, `/var/tmp`, and the macOS `/private/…` spellings) are matched by
+  **ancestry**, since anything beneath them disappears on reboot.
+
+Claiming a workspace in those locations would be worse than having none:
+`defaultClaimApplicability` turns any workspace id into workspace scope, pinning a
+globally-intended rule to a directory that will not exist next week.
 
 It buffers the evidence and returns `202` with
 `{"ok":true,"evidence_id":"...","buffered":true,"job_id":null}`. Ingest no longer creates one

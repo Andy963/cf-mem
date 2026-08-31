@@ -971,17 +971,29 @@ function candidateAccepted(
   activeClaims: ReadonlyArray<StoredClaimRow>,
   webReferenceIds: ReadonlySet<string>,
   assistantOnlyIds: ReadonlySet<string>,
+  survivingEvidenceIds: ReadonlySet<string>,
 ): boolean {
   if (verdictByIndex.get(index)?.verdict !== "accept") return false;
   if (!eligibleCandidate(candidate, job, activeClaims)) return false;
 
-  const evidenceIds = candidateEvidenceIds(candidate, job);
+  // Restrict to evidence that still exists. The web_reference and
+  // assistant-only sets are built from the surviving rows, so an id that
+  // retention already deleted is absent from both and would otherwise satisfy
+  // every "some id is not X" guard below by virtue of being unclassifiable.
+  const evidenceIds = candidateEvidenceIds(candidate, job).filter((id) => survivingEvidenceIds.has(id));
   if (!evidenceIds.some((id) => !webReferenceIds.has(id))) return false;
 
   // A rule or user_profile claim must rest on something the user actually
   // said. The prompt states this, but an extractor is free to ignore it, so
   // the invariant is enforced here the same way web_reference support is.
-  const category = candidate.category
+  //
+  // On a supersede the persisted category comes from the claim being replaced,
+  // not from the candidate: an implicit domain_fact candidate is allowed to
+  // rewrite an existing rule. Resolve the same target the write path will use,
+  // otherwise assistant text could rewrite a rule through that door.
+  const target = activeClaimForCandidate(candidate, activeClaims);
+  const category = target?.category
+    ?? candidate.category
     ?? (candidate.type === "profile" ? "user_profile" : null);
   if (category === "rule" || category === "user_profile") {
     return evidenceIds.some((id) => !webReferenceIds.has(id) && !assistantOnlyIds.has(id));
@@ -1034,12 +1046,13 @@ async function recordCandidateVerdicts(
   activeClaims: ReadonlyArray<StoredClaimRow>,
   webReferenceIds: ReadonlySet<string>,
   assistantOnlyIds: ReadonlySet<string>,
+  survivingEvidenceIds: ReadonlySet<string>,
 ): Promise<void> {
   const verdictByIndex = new Map(verdicts.map((verdict) => [verdict.candidate_index, verdict]));
   const now = Date.now();
   const statements = candidates.map((candidate, index) => {
     const verdict = verdictByIndex.get(index);
-    const status = candidateAccepted(candidate, index, verdictByIndex, job, activeClaims, webReferenceIds, assistantOnlyIds)
+    const status = candidateAccepted(candidate, index, verdictByIndex, job, activeClaims, webReferenceIds, assistantOnlyIds, survivingEvidenceIds)
       ? "accepted"
       : verdict?.verdict === "hold" && eligibleCandidate(candidate, job, activeClaims) ? "held" : "rejected";
     return env.DB.prepare(
@@ -1065,9 +1078,15 @@ async function applyOneClaim(
   extracted: ExtractedClaim,
   activeById: ReadonlyMap<string, StoredClaimRow>,
   jobEvidence: string[],
+  survivingEvidenceIds: ReadonlySet<string>,
 ): Promise<void> {
-  const evidenceSegmentIds = candidateEvidenceIds(extracted, job);
-  const resolvedEvidenceIds = evidenceSegmentIds.length > 0 ? evidenceSegmentIds : jobEvidence;
+  // Must match candidateAccepted's view: verifyEvidence rejects any id whose
+  // segment was pruned by retention, and that throw is swallowed per candidate,
+  // so an unfiltered id here loses an already-accepted claim silently.
+  const evidenceSegmentIds = candidateEvidenceIds(extracted, job).filter((id) => survivingEvidenceIds.has(id));
+  const resolvedEvidenceIds = evidenceSegmentIds.length > 0
+    ? evidenceSegmentIds
+    : jobEvidence.filter((id) => survivingEvidenceIds.has(id));
   if (!["create", "reinforce", "supersede", "retract"].includes(extracted.operation)) {
     throw new Error("extractor_claim_invalid_operation");
   }
@@ -1178,6 +1197,7 @@ async function applyExtractedClaims(
   job: ProfileJob,
   output: ExtractedClaim[],
   activeClaims: StoredClaimRow[],
+  survivingEvidenceIds: ReadonlySet<string>,
 ): Promise<{ applied: number; failures: string[] }> {
   const activeById = new Map(activeClaims.map((claim) => [claim.id, claim]));
   const jobEvidence = jobEvidenceIds(job);
@@ -1186,7 +1206,7 @@ async function applyExtractedClaims(
 
   for (const [index, extracted] of output.entries()) {
     try {
-      await applyOneClaim(env, scope, job, extracted, activeById, jobEvidence);
+      await applyOneClaim(env, scope, job, extracted, activeById, jobEvidence, survivingEvidenceIds);
       applied += 1;
     } catch (error) {
       if (isBreakerOpenError(error)) throw error;
@@ -1414,9 +1434,10 @@ export async function processProfileJob(env: Env, id: string): Promise<void> {
     const candidates = await callExtractor(env, evidenceText, activeClaims, job.workspace_id, workspaceName);
     const verdicts = await verifyCandidates(env, candidates, evidenceText);
     const assistantOnlyIds = assistantOnlyEvidenceIds(evidence, survivingEvidenceIds);
-    await recordCandidateVerdicts(env, job, candidates, verdicts, activeClaims, webReferenceIds, assistantOnlyIds);
+    const survivingIdSet = new Set(survivingEvidenceIds);
+    await recordCandidateVerdicts(env, job, candidates, verdicts, activeClaims, webReferenceIds, assistantOnlyIds, survivingIdSet);
     const verdictByIndex = new Map(verdicts.map((verdict) => [verdict.candidate_index, verdict]));
-    const accepted = candidates.filter((candidate, index) => candidateAccepted(candidate, index, verdictByIndex, job, activeClaims, webReferenceIds, assistantOnlyIds));
+    const accepted = candidates.filter((candidate, index) => candidateAccepted(candidate, index, verdictByIndex, job, activeClaims, webReferenceIds, assistantOnlyIds, survivingIdSet));
     const hasActiveClaims = activeClaims.some((claim) => claim.status === "active");
     const decisions = hasActiveClaims
       ? await callReconciliation(env, accepted, activeClaims, job.workspace_id)
@@ -1426,7 +1447,7 @@ export async function processProfileJob(env: Env, id: string): Promise<void> {
         reason: "no_active_claims",
       }));
     const reconciled = reconcileAcceptedCandidates(accepted, decisions, activeClaims);
-    const { applied, failures } = await applyExtractedClaims(env, scope, job, reconciled, activeClaims);
+    const { applied, failures } = await applyExtractedClaims(env, scope, job, reconciled, activeClaims, survivingIdSet);
     // Per-candidate failures are model-output problems: retrying re-runs the
     // same prompt and hits the same bad candidate, so the job is completed with
     // the failures recorded rather than retried into 'dead'.

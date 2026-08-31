@@ -39,6 +39,13 @@ function parseAllowedProjects(raw: string | undefined): Set<string> | null {
     }
     values.push(projectId);
   }
+  // A separator-only value is a malformed allowlist, not an absent one. An
+  // empty Set would 403 every request; returning null would silently disable
+  // the allowlist and let the shared token reach any project. Both are wrong,
+  // so fail the same way an invalid entry does.
+  if (values.length === 0) {
+    throw new RequestAuthError(500, "ALLOWED_MEMORY_PROJECTS must contain at least one project id");
+  }
   return new Set(values);
 }
 

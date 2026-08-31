@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +37,28 @@ _REFRESH_TOKEN_THRESHOLD = 256_000
 _DEFAULT_PROJECT_ID = "personal"
 _MIN_ASSISTANT_CAPTURE_CHARS = 80
 _TRANSCRIPT_TAIL_BYTES = 512_000
+# Anything under a temp root disappears on reboot, so the whole subtree is
+# disqualified. Both the symlinked and resolved macOS spellings are listed:
+# /var -> /private/var means a bare "/var/tmp" never matches a resolved path.
+def _temp_roots() -> frozenset[Path]:
+    roots = {
+        Path("/tmp"), Path("/var/tmp"),
+        Path("/private/tmp"), Path("/private/var/tmp"),
+        # macOS per-user temp: $TMPDIR is /var/folders/<..>/T/<..>, which
+        # resolves under /private/var/folders and matches none of the above.
+        Path("/var/folders"), Path("/private/var/folders"),
+    }
+    try:
+        roots.add(Path(tempfile.gettempdir()).resolve())
+    except Exception:
+        pass
+    return frozenset(roots)
+
+
+_TEMP_ROOTS = _temp_roots()
+# Matched exactly only. "/" is every path's ancestor and $HOME is where real
+# projects live, so testing either by ancestry would disqualify everything.
+_NON_PROJECT_EXACT = frozenset({Path("/")})
 
 
 def _resolve_config_path(raw_path: str | None = None) -> Path:
@@ -90,10 +113,18 @@ def _resolve_workspace_info(value: str | None) -> tuple[str, str] | None:
                 root = candidate
                 break
         if root is None:
-            # No repo marker: the directory itself is still the project identity.
-            # Returning None here used to drop workspace_id entirely, leaving the
-            # extracted facts unattributable to any project.
+            # No repo marker: the directory itself is still the project
+            # identity, so facts stated there stay attributable.
             root = current
+        # $HOME and the temp roots are not projects even when they happen to
+        # contain a marker (a stray /tmp/.git is enough). Claiming otherwise is
+        # worse than having no workspace at all: defaultClaimApplicability turns
+        # any truthy workspace_id into workspace scope, which would pin a
+        # globally-intended rule to that directory forever.
+        if root in _NON_PROJECT_EXACT or root == Path.home().resolve():
+            return None
+        if any(root == r or r in root.parents for r in _TEMP_ROOTS):
+            return None
         project_name = root.name
         digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
         return f"ws_{project_name}_{digest}", project_name
@@ -514,7 +545,7 @@ def handle_assistant_capture(source_app: str, config_path: str | None = None) ->
         }
         event_id = _extract_event_id(payload)
         if event_id:
-            body["event_id"] = f"assistant:{event_id}"
+            body["event_id"] = event_id
         if workspace_info:
             body["workspace_id"], body["workspace_name"] = workspace_info
 
