@@ -40,6 +40,9 @@ export interface Env {
   CLAIMS_INDEX?: VectorizeIndex;
 
   API_TOKEN?: string;
+  MEMORY_API_TOKEN?: string;
+  ALLOWED_MEMORY_PROJECTS?: string;
+  /** Deprecated migration credentials; never use them to derive a scope. */
   PROJECT_TOKENS_JSON?: string;
   PERSONAL_MEMORY_TOKEN?: string;
   PERSONAL_MEMORY_PROJECT_ID?: string;

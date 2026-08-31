@@ -29,7 +29,7 @@ interface ProjectRow {
 }
 
 const CLAIM_STATUSES = ["active", "superseded", "retracted", "proposed"] as const;
-const CLAIM_TYPES = ["preference", "instruction", "decision", "profile", "task_state"] as const;
+const CLAIM_TYPES = ["preference", "instruction", "decision", "profile"] as const;
 const CLAIM_PAGE_SIZE = 25;
 
 interface AdminClaimRow {
@@ -646,7 +646,7 @@ const DASHBOARD_HTML = `<!doctype html>
         <input id="claim-query" type="search" placeholder="Search claim text, subject, or key" aria-label="Search claims">
         <select id="claim-project" aria-label="Filter by project"><option value="">All projects</option></select>
         <select id="claim-status" aria-label="Filter by status"><option value="">All statuses</option><option value="active">Active</option><option value="proposed">Proposed</option><option value="superseded">Superseded</option><option value="retracted">Retracted</option></select>
-        <select id="claim-type" aria-label="Filter by type"><option value="">All types</option><option value="preference">Preference</option><option value="instruction">Instruction</option><option value="decision">Decision</option><option value="profile">Profile</option><option value="task_state">Task state</option></select>
+        <select id="claim-type" aria-label="Filter by type"><option value="">All types</option><option value="preference">Preference</option><option value="instruction">Instruction</option><option value="decision">Decision</option><option value="profile">Profile</option></select>
         <button type="submit">Filter</button>
       </form>
       <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Type / scope</th><th>Status</th><th>Confidence</th><th>Used</th><th>Updated</th><th>Operations</th></tr></thead><tbody id="claim-rows"></tbody></table></div>

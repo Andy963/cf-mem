@@ -8,7 +8,7 @@
 - embedding：调用 Cloudflare Workers AI 生成向量
 - text storage：把原文 + 元数据落到 D1（`cf-text`）
 - vector storage：把向量 + id + 少量可过滤 metadata 落到 Vectorize（`cf-vector`）
-- project isolation：`/memory/*` 按 project token + D1 `project_id` + Vectorize namespace 做硬隔离
+- project isolation：`/memory/*` 按全局鉴权 token + 显式 `X-Project-Id` + D1 `project_id` + Vectorize namespace 做硬隔离
 
 > 说明：`migrations/` 只用于初始化或升级 D1 表结构；Worker 运行时不会读取这些 SQL 文件。
 
@@ -112,17 +112,14 @@ HTML/XHTML/纯文本。Worker 无法在 fetch 前做 DNS 解析，因此指向�
 需要登录态或内网的页面同样不在支持范围内。`/web/search` 与 `/web/crawl` 没有本地等价物，未配置
 Tavily 时返回 `503`。
 
-配置 memory 项目隔离（`/memory/*` 必填）：
+配置 memory 项目隔离（`/memory/*` 请求必须带项目头）：
 
 ```bash
-npx wrangler secret put PROJECT_TOKENS_JSON
+npx wrangler secret put MEMORY_API_TOKEN
 ```
 
-输入示例：
-
-```json
-{"proj-a":"token-for-a","proj-b":"token-for-b"}
-```
+请求头示例：`Authorization: Bearer <shared-token>` 和 `X-Project-Id: whisper`。
+请求体如包含 `project_id`，也必须与该请求头一致。
 
 部署：
 
@@ -171,11 +168,12 @@ policy and could allow a forged header to bypass the Worker-level email check.
 
 `/memory/*` 现在默认按项目硬隔离：
 
-1. 每个请求先用 `PROJECT_TOKENS_JSON` 把 token 解析为唯一 `project_id`
-2. 写入 D1 时强制写入 `project_id`
-3. 写入 Vectorize 时强制写入 `namespace = project:<project_id>`
-4. 查询 Vectorize 时固定只查当前项目 namespace
-5. 即使请求体自己传了 `project_id`，也只能与鉴权项目一致；不一致直接返回 `400`
+1. 每个请求先用 `MEMORY_API_TOKEN`（迁移期间未设置时回退 `API_TOKEN`）验证全局 token
+2. `X-Project-Id` 是唯一的项目路由来源；不再从 token 推断项目
+3. 写入 D1 时强制写入 `project_id`
+4. 写入 Vectorize 时强制写入 `namespace = project:<project_id>`
+5. 查询 Vectorize 时固定只查当前项目 namespace
+6. 即使请求体自己传了 `project_id`，也只能与请求头一致；不一致直接返回 `400`
 
 这意味着：
 
@@ -187,7 +185,7 @@ policy and could allow a forged header to bypass the Worker-level email check.
 Vectorize 的 vector id 上限是 64 字节，而 segment id 的实际形式是
 `project:<project_id>:<segment_id>`，因此 `project_id` 会直接吃掉这个预算：
 
-- `project_id` 最长 **32 字符**，超出的会在解析 `PROJECT_TOKENS_JSON` 时报配置错误
+- `project_id` 最长 **32 字符**，超出的会返回 `400`
 - 自动派生的 segment id（`seg_<hash>` / `pe_<hash>`）会按剩余预算自动收窄摘要宽度，
   最短保留 16 个十六进制字符；`project_id` 在 19 字符以内时摘要宽度与旧版完全一致，
   因此不会改变既有数据的 id
@@ -201,7 +199,7 @@ Vectorize 的 vector id 上限是 64 字节，而 segment id 的实际形式是
 ```text
 src/
   index.ts              # entry + route-level auth
-  auth.ts               # project token -> project scope
+  auth.ts               # shared token + explicit project header -> project scope
   project.ts            # project id / namespace helpers
   env.ts                # Env typings
   utils.ts              # shared helpers
@@ -245,22 +243,54 @@ Vectorize 暂时失败会保留 job 并由下一次 Cron sweep 自动重试。
 
 `POST /memory/forget` 提供项目内的 user 或 session scope 删除，业务调用方必须在自己的认证层
 验证该 scope 属于当前用户。Whisper Telegram 仅在 private chat 中公开 `/forget CONFIRM` 与
-`/forget_all CONFIRM`，并使用既有项目 token 调用此业务 API。
+`/forget_all CONFIRM`，并使用共享 token 与 `X-Project-Id` 调用此业务 API。
 
 ## Shared profile extraction
 
-`POST /memory/profile/ingest` accepts bounded user evidence from the authenticated `personal`
-project only:
+`POST /memory/profile/ingest` accepts bounded user evidence from the project selected by
+`X-Project-Id`:
+
+The shared profile connector sends `X-Project-Id: personal` by default so user preferences
+remain cross-tool. A caller that intentionally needs project-local profile evidence can set an
+explicit `project_id` in its connector configuration.
 
 ```json
 {
   "text": "I prefer concise replies.",
+  "role": "user",
   "source_app": "codex",
   "external_session_id": "session-123",
   "workspace_id": "ws_cf-mem_0123456789abcdef",
   "workspace_name": "cf-mem"
 }
 ```
+
+`role` is optional and defaults to `user`. Set `role: "assistant"` to submit the assistant's own
+final reply for the turn. Assistant evidence exists because project facts — a design conclusion,
+a root cause, an interface contract — are stated in the reply, not in the prompt. It is stored
+under an `[assistant]` marker, surfaced to the extractor as evidence of `kind: "assistant"` with
+its own character budget, and governed by a weaker evidentiary bar:
+
+- It is a valid source for `domain_fact` and `tool_insight`.
+- It may **never** be the sole support for a `rule` or `user_profile` candidate; those must rest
+  on what the user themselves said.
+- It is treated as a proposal, not established truth. The extractor only promotes a conclusion the
+  user accepted or that was actually carried out, so speculation and corrected answers are not
+  hardened into memory.
+
+A batch that contains no user evidence is not extracted at all, so an assistant monologue cannot
+produce claims on its own.
+
+`scripts/install-hooks.sh` wires both directions for codex, droid, and claude:
+`UserPromptSubmit` runs `cf_mem_hook.py hook-capture` for the prompt, and `Stop` runs
+`cf_mem_hook.py hook-assistant` for the final reply. The assistant hook reads the reply from the
+event payload, falling back to the last assistant turn in `transcript_path`. Before upload it
+scrubs credential-shaped strings (`sk-…`, `ghp_…`, `AKIA…`, JWTs, and `token=`/`api_key=`
+assignments) and skips replies under 80 characters, which are acknowledgements rather than facts.
+
+The workspace resolver no longer returns nothing for a directory without a `.git`,
+`package.json`, or `pyproject.toml` marker: it falls back to the directory itself, so extracted
+facts always carry a project identity.
 
 It buffers the evidence and returns `202` with
 `{"ok":true,"evidence_id":"...","buffered":true,"job_id":null}`. Ingest no longer creates one
@@ -291,7 +321,6 @@ keeps, reinforces, or supersedes an evidence-backed accepted candidate; it canno
 retract an existing claim or rewrite candidate fields. Candidate and verdict records are auditable
 in D1; only accepted, explicit, agent-relevant candidates can become active claims. Opinions,
 subjective evaluations, and current-workflow descriptions are rejected rather than reclassified as
-preferences. Accepted `task_state` candidates must also carry a future expiry time.
 Any candidate carrying a `valid_until` must express it as future Unix milliseconds; a past or
 second-resolution value is rejected instead of producing a claim that is stored yet already expired.
 A candidate missing any field the pipeline consumes (`type`, `subject`, `memory_key`,
@@ -419,17 +448,17 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/jso
   -d '{"input":["hello","world"]}'
 ```
 
-Memory health（使用项目 token）：
+Memory health（使用共享 token 与项目头）：
 
 ```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" \
+curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" \
   https://<your-worker>/memory/health
 ```
 
 Index memory（Worker 会自动补入 `project_id`）：
 
 ```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application/json" \
+curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
   https://<your-worker>/memory/index \
   -d '{"text":"hello world","metadata":{"session_id":"s1","tape":"t1","kind":"note"}}'
 ```
@@ -441,7 +470,7 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
 Search memory：
 
 ```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application/json" \
+curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
   https://<your-worker>/memory/search \
   -d '{"query":"hello","topK":5,"filter":{"session_id":"s1","tape":"t1"}}'
 ```
@@ -453,7 +482,7 @@ curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application
 如果你希望“召回 + 精排”，可以在请求体里打开 `rerank`，让 Worker 额外调用 Workers AI 的 reranker 模型对候选结果重排（会带来额外延迟与成本）：
 
 ```bash
-curl -sS -H "Authorization: Bearer $PROJECT_TOKEN" -H "Content-Type: application/json" \
+curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
   https://<your-worker>/memory/search \
   -d '{"query":"hello","topK":5,"filter":{"session_id":"s1","tape":"t1"},"rerank":{"enabled":true,"topN":20}}'
 ```
@@ -518,13 +547,13 @@ segment ids。若传入 `query`，Worker 会把固定 scope 内存与专用 clai
 它用于 Agent 每轮开始前加载受限、结构化的记忆上下文：
 
 可用 `categories` 选择路由：`rule` 返回全局及当前工作区规则，`tool_insight` 需要同时传入
-工具名称 `scope_id`，`user_profile` 返回当前用户画像，`task_state` 返回当前用户或会话的未过期任务状态，
+工具名称 `scope_id`，`user_profile` 返回当前用户画像，
 `domain_fact` 仅在 query 非空且非 trivial 时执行语义召回。未指定 `categories` 时保持旧版 scope + semantic 合并行为。
 
 对 `domain_fact` 与 `user_profile` claim，响应还会返回 `active_score`。它按置信度、距最近使用的天数
-和 `use_count` 计算，用于观察记忆活跃度；`rule`、`tool_insight` 与 `task_state` 返回 `null`，不参与时间衰减。
-`task_state` claim 必须提供未来的 `valid_until`；过期状态不会被上下文路由返回。所有 task state
-还必须携带并精确匹配请求的 `workspace_id`；无法归属工作区的历史状态仅保留审计记录，不会再进入上下文。
+和 `use_count` 计算，用于观察记忆活跃度；`rule` 与 `tool_insight` 返回 `null`，不参与时间衰减。
+
+`task_state` 分类已退役（迁移 `0019`）。任何残留的历史行都不会进入上下文路由。
 
 例如，SessionStart 可以只请求全局规则、当前工作区规则和用户画像：
 
@@ -554,7 +583,7 @@ segment ids。若传入 `query`，Worker 会把固定 scope 内存与专用 clai
 }
 ```
 
-`GET /memory/claims` 用于审计和管理当前提炼出的记忆。它仍受项目 token 保护，可按
+`GET /memory/claims` 用于审计和管理当前提炼出的记忆。它仍受共享 token 与项目头保护，可按
 `scope_kind`、`scope_id`、`status` 和 `limit` 过滤：
 
 ```text
@@ -566,7 +595,7 @@ GET /memory/claims?scope_kind=user&scope_id=user-123&status=active&limit=100
 如果你是从旧版 `cf-mem` 升级：
 
 1. 先执行 `npx wrangler d1 migrations apply cf-text --remote`，把 `project_id` 列和索引补上
-2. 再配置 `PROJECT_TOKENS_JSON` secret
+2. 再配置 `MEMORY_API_TOKEN`（迁移期间也可暂时确认 `API_TOKEN` 已配置）
 3. 旧数据如果之前没有 `project_id` 或仍在 Vectorize 默认 namespace，需要按项目重新走一次 `/memory/index`，把向量写入新的 `project:<project_id>` namespace
 
 也就是说，这次升级会把 memory 从“共享池”切到“项目级命名空间”；只有完成 reindex 的项目，才能在新隔离模型下被 `/memory/search` 查到。

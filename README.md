@@ -5,7 +5,7 @@
 - 用 Workers AI 生成 embedding
 - 用 D1 保存原文、证据和结构化 Claims
 - 用 Vectorize 做相似度搜索
-- 按项目 token 隔离数据
+- 通过显式 `X-Project-Id` 和 D1/Vectorize namespace 隔离项目数据
 
 ## 先看这里
 
@@ -61,15 +61,25 @@ npx wrangler d1 migrations apply cf-text --remote
 # 使用 embedding 或网页接口时需要
 npx wrangler secret put API_TOKEN
 
-# 使用项目级 /memory/* 时需要
-npx wrangler secret put PROJECT_TOKENS_JSON
+# /memory/* 使用全局鉴权 token；项目由请求头显式指定
+# 未设置 MEMORY_API_TOKEN 时会回退使用 API_TOKEN
+# npx wrangler secret put MEMORY_API_TOKEN
 ```
 
-`PROJECT_TOKENS_JSON` 是项目 ID 到 token 的映射，例如：
+请求示例：
 
-```json
-{"proj-a":"替换成项目A的随机token"}
+```bash
+curl -sS \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "X-Project-Id: cf-mem" \
+  -H "Content-Type: application/json" \
+  https://<your-worker>/memory/index \
+  -d '{"text":"用户喜欢简洁的回答。"}'
 ```
+
+旧的 `PROJECT_TOKENS_JSON` / `PERSONAL_MEMORY_TOKEN` 只在迁移窗口内接受，且必须同时带上
+与旧凭据绑定的 `X-Project-Id`；它们不能再推断项目，也不能跨项目使用。新客户端只使用共享
+token + 显式项目头。迁移完成后删除这两个旧 secret。
 
 不要把 token 写进 `wrangler.toml`，也不要提交到 Git。
 
@@ -93,8 +103,8 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" \
 
 | 功能 | 额外配置 |
 | --- | --- |
-| 原始记忆 `/memory/*` | `PROJECT_TOKENS_JSON` |
-| 个人记忆自动提炼 | `PERSONAL_MEMORY_TOKEN`、`PERSONAL_MEMORY_OWNER_ID`、模型接口配置 |
+| 原始记忆 `/memory/*` | `MEMORY_API_TOKEN`（未设置时回退 `API_TOKEN`）和 `X-Project-Id` |
+| 记忆自动提炼 | `PERSONAL_MEMORY_OWNER_ID`、模型接口配置；鉴权使用共享 token |
 | 网页搜索和抓取 | `TAVILY_API_TOKEN`、`TAVILY_BASE_URL` |
 | 搜索精排 | `RERANK_DEFAULT_ENABLED`，或请求中的 `rerank.enabled` |
 | 管理后台 | Cloudflare Access、`ADMIN_ALLOWED_EMAIL` |
@@ -120,7 +130,8 @@ curl -sS \
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $PROJECT_TOKEN" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "X-Project-Id: cf-mem" \
   -H "Content-Type: application/json" \
   https://<your-worker>/memory/index \
   -d '{"text":"用户喜欢简洁的回答。","metadata":{"session_id":"s1","kind":"note"}}'
@@ -130,7 +141,8 @@ curl -sS \
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $PROJECT_TOKEN" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "X-Project-Id: cf-mem" \
   -H "Content-Type: application/json" \
   https://<your-worker>/memory/search \
   -d '{"query":"用户喜欢什么样的回答？","topK":5}'
@@ -140,7 +152,8 @@ curl -sS \
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $PROJECT_TOKEN" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "X-Project-Id: cf-mem" \
   -H "Content-Type: application/json" \
   https://<your-worker>/memory/claims \
   -d '{
@@ -178,7 +191,7 @@ Claims 的 `create` 会先检查身份键，再在同一项目、scope、分类�
 | `GET /memory/claims` | 查看 Claims |
 | `GET /memory/context` | 获取按分类路由的记忆上下文 |
 | `POST /memory/context` | 获取当前有效记忆上下文 |
-| `POST /memory/profile/ingest` | 提交个人记忆提炼证据 |
+| `POST /memory/profile/ingest` | 提交记忆提炼证据（`role` 可选 `user`/`assistant`）|
 | `POST /memory/extraction/ingest` | 提交已索引证据进行自动提炼 |
 | `POST /web/extract` | 提取网页正文 |
 | `POST /web/search`、`POST /web/crawl` | 转发 Tavily 请求 |
@@ -187,7 +200,9 @@ Claims 的 `create` 会先检查身份键，再在同一项目、scope、分类�
 `POST /memory/context` 对空输入、斜杠命令和短确认词会跳过语义 embedding 与 Vectorize 查询，
 但仍会返回按 scope 确定性匹配的 Claims。
 
-持久记忆支持 `rule`、`tool_insight`、`user_profile`、`domain_fact` 和 `task_state` 五类。
+持久记忆支持 `rule`、`tool_insight`、`user_profile` 和 `domain_fact` 四类。`task_state` 已于
+迁移 `0019` 退役：线上从未产生过该类记忆，而它是唯一需要 TTL 与工作区精确匹配的分类，
+历史行统一置为 `retracted` 保留审计。
 `/memory/context` 可通过 `categories`、`workspace_id` 和 `scope_id` 做按需路由；未指定
 `categories` 时保持兼容旧调用，返回原有 scope 内的有效 Claims（不广播新分类的 `tool_insight`）。`/memory/search` 默认只检索
 `domain_fact` 原始段落；`profile_inbox` 仅作为提炼证据，始终不会出现在原始搜索结果中。需要其他分类时显式传入 `categories`，并确保索引元数据包含对应字段。

@@ -14,6 +14,24 @@ import { runNudgeExtractionScan } from "./memory/nudge";
 // lifting throughput from 12 to 36 jobs/hour at the current 5-minute cron.
 const PROFILE_JOBS_PER_TICK = 10;
 
+async function validateRequestProjectId(request: Request, projectId: string): Promise<void> {
+  if (request.method.toUpperCase() === "GET") return;
+  const contentType = request.headers.get("content-type") || "";
+  if (!contentType.toLowerCase().includes("application/json")) return;
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    return;
+  }
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const value = (body as Record<string, unknown>).project_id;
+    if (value !== undefined && value !== projectId) {
+      throw new RequestAuthError(400, "project_id does not match X-Project-Id");
+    }
+  }
+}
+
 function getRequiredApiToken(env: Pick<Env, "API_TOKEN">): string | null {
   const token = env.API_TOKEN?.trim();
   return token ? token : null;
@@ -49,11 +67,16 @@ export default {
     if (url.pathname.startsWith("/memory/")) {
       try {
         const projectScope = resolveProjectScope(request, env);
+        await validateRequestProjectId(request, projectScope.projectId);
         return await handleMemoryRequest(request, env, projectScope);
       } catch (error) {
         if (error instanceof RequestAuthError) {
           if (error.status === 401) {
             return unauthorizedResponse(env, "cf-mem-memory");
+          }
+
+          if (error.status < 500) {
+            return jsonResponse(env, { error: { message: error.message } }, { status: error.status });
           }
 
           // Server-side auth errors describe the deployment's secrets, so the

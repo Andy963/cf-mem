@@ -1,4 +1,4 @@
-import { getBearerToken } from "./api/http";
+import { constantTimeEqual, getBearerToken } from "./api/http";
 import type { Env } from "./env";
 import { createProjectScope, normalizeProjectId, type ProjectScope } from "./project";
 
@@ -20,11 +20,40 @@ function getRequestToken(request: Request): string | null {
   return apiKey?.trim() || null;
 }
 
-function parseProjectTokenMap(raw: string | undefined): Map<string, string> {
+function getRequestedProjectId(request: Request): string | null {
+  const value = request.headers.get("X-Project-Id");
+  return value?.trim() || null;
+}
+
+function parseAllowedProjects(raw: string | undefined): Set<string> | null {
   const source = raw?.trim();
-  if (!source) {
-    throw new RequestAuthError(500, "PROJECT_TOKENS_JSON is required for /memory/*");
+  if (!source) return null;
+
+  const values: string[] = [];
+  for (const rawValue of source.split(",")) {
+    const trimmed = rawValue.trim();
+    if (!trimmed) continue;
+    const projectId = normalizeProjectId(trimmed);
+    if (!projectId) {
+      throw new RequestAuthError(500, "ALLOWED_MEMORY_PROJECTS must contain only valid project ids");
+    }
+    values.push(projectId);
   }
+  return new Set(values);
+}
+
+function resolveSharedMemoryToken(env: Pick<Env, "API_TOKEN" | "MEMORY_API_TOKEN">): string | null {
+  // MEMORY_API_TOKEN is deliberately preferred so memory credentials can be
+  // rotated independently from the embedding/web API token. API_TOKEN remains
+  // a temporary fallback for the existing deployment during migration.
+  const token = env.MEMORY_API_TOKEN?.trim() || env.API_TOKEN?.trim();
+  return token || null;
+}
+
+/** Parse only the migration credential set; callers must still provide a header. */
+function parseLegacyProjectTokenMap(raw: string | undefined): Map<string, string> {
+  const source = raw?.trim();
+  if (!source) return new Map();
 
   let parsed: unknown;
   try {
@@ -32,7 +61,6 @@ function parseProjectTokenMap(raw: string | undefined): Map<string, string> {
   } catch {
     throw new RequestAuthError(500, "PROJECT_TOKENS_JSON must be valid JSON");
   }
-
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new RequestAuthError(500, "PROJECT_TOKENS_JSON must be a JSON object");
   }
@@ -43,7 +71,6 @@ function parseProjectTokenMap(raw: string | undefined): Map<string, string> {
     if (!projectId) {
       throw new RequestAuthError(500, `Invalid project id in PROJECT_TOKENS_JSON: ${rawProjectId}`);
     }
-
     if (typeof rawToken !== "string" || !rawToken.trim()) {
       throw new RequestAuthError(500, `Invalid token for project ${projectId} in PROJECT_TOKENS_JSON`);
     }
@@ -52,51 +79,71 @@ function parseProjectTokenMap(raw: string | undefined): Map<string, string> {
     if (tokenToProject.has(token)) {
       throw new RequestAuthError(500, `Duplicate token detected in PROJECT_TOKENS_JSON for project ${projectId}`);
     }
-
     tokenToProject.set(token, projectId);
   }
-
-  if (tokenToProject.size === 0) {
-    throw new RequestAuthError(500, "PROJECT_TOKENS_JSON must define at least one project token");
-  }
-
   return tokenToProject;
 }
 
 export function resolveProjectScope(
   request: Request,
-  env: Pick<Env, "PROJECT_TOKENS_JSON" | "PERSONAL_MEMORY_TOKEN" | "PERSONAL_MEMORY_PROJECT_ID">,
+  env: Pick<Env, "API_TOKEN" | "MEMORY_API_TOKEN" | "ALLOWED_MEMORY_PROJECTS" | "PROJECT_TOKENS_JSON" | "PERSONAL_MEMORY_TOKEN" | "PERSONAL_MEMORY_PROJECT_ID">,
 ): ProjectScope {
   const requestToken = getRequestToken(request);
   if (!requestToken) {
     throw new RequestAuthError(401, "Unauthorized");
   }
 
-  const personalToken = env.PERSONAL_MEMORY_TOKEN?.trim();
-  const tokenToProject = env.PROJECT_TOKENS_JSON?.trim()
-    ? parseProjectTokenMap(env.PROJECT_TOKENS_JSON)
-    : null;
-  if (personalToken && tokenToProject?.has(personalToken)) {
-    throw new RequestAuthError(500, "PERSONAL_MEMORY_TOKEN must not overlap a project token");
-  }
-  if (personalToken && requestToken === personalToken) {
-    const personalProjectId = normalizeProjectId(env.PERSONAL_MEMORY_PROJECT_ID ?? "personal");
-    if (!personalProjectId) {
-      throw new RequestAuthError(500, "PERSONAL_MEMORY_PROJECT_ID is invalid");
-    }
-    return createProjectScope(personalProjectId);
+  const sharedToken = resolveSharedMemoryToken(env);
+  const personalToken = env.PERSONAL_MEMORY_TOKEN?.trim() || null;
+  if (!sharedToken && !env.PROJECT_TOKENS_JSON?.trim() && !personalToken) {
+    throw new RequestAuthError(500, "MEMORY_API_TOKEN or API_TOKEN is required for /memory/*");
   }
 
-  const projectId = tokenToProject?.get(requestToken);
+  const requestedProjectId = getRequestedProjectId(request);
+  if (!requestedProjectId) {
+    throw new RequestAuthError(400, "X-Project-Id is required");
+  }
+
+  const projectId = normalizeProjectId(requestedProjectId);
   if (!projectId) {
-    // A personal token on its own is a valid deployment. Re-parsing an absent
-    // PROJECT_TOKENS_JSON here used to turn a simple bad token into a 500 that
-    // leaked the name of a missing secret to unauthenticated callers.
-    if (!tokenToProject && !personalToken) {
-      throw new RequestAuthError(500, "PROJECT_TOKENS_JSON is required for /memory/*");
+    throw new RequestAuthError(400, "X-Project-Id is invalid");
+  }
+
+  const allowedProjects = parseAllowedProjects(env.ALLOWED_MEMORY_PROJECTS);
+  const ensureProjectAllowed = (id: string): void => {
+    if (allowedProjects && !allowedProjects.has(id)) {
+      throw new RequestAuthError(403, "Project is not allowed for this token");
     }
+  };
+
+  if (sharedToken && constantTimeEqual(requestToken, sharedToken)) {
+    ensureProjectAllowed(projectId);
+    return createProjectScope(projectId);
+  }
+
+  // Legacy credentials are accepted only during migration and only when the
+  // caller explicitly names the exact project they were issued for. They are
+  // never used to infer a scope, and a token for project A cannot be replayed
+  // with a project-B header.
+  const legacyProjectTokens = env.PROJECT_TOKENS_JSON?.trim()
+    ? parseLegacyProjectTokenMap(env.PROJECT_TOKENS_JSON)
+    : new Map<string, string>();
+  let legacyProjectId = legacyProjectTokens.get(requestToken) ?? null;
+  if (personalToken && constantTimeEqual(requestToken, personalToken)) {
+    legacyProjectId = normalizeProjectId(env.PERSONAL_MEMORY_PROJECT_ID ?? "personal");
+    if (!legacyProjectId) {
+      throw new RequestAuthError(500, "PERSONAL_MEMORY_PROJECT_ID is invalid");
+    }
+  }
+  if (!legacyProjectId) {
     throw new RequestAuthError(401, "Unauthorized");
   }
+  if (legacyProjectId !== projectId) {
+    throw new RequestAuthError(403, "Legacy token is bound to a different project; rotate it to the shared memory token");
+  }
+
+  ensureProjectAllowed(projectId);
+  console.warn(`[auth] legacy project credential used for explicit project ${projectId}`);
 
   return createProjectScope(projectId);
 }

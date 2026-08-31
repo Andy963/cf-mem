@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -32,6 +33,9 @@ _STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 _STATE_MAX_SESSIONS = 512
 _REFRESH_TURN_THRESHOLD = 32
 _REFRESH_TOKEN_THRESHOLD = 256_000
+_DEFAULT_PROJECT_ID = "personal"
+_MIN_ASSISTANT_CAPTURE_CHARS = 80
+_TRANSCRIPT_TAIL_BYTES = 512_000
 
 
 def _resolve_config_path(raw_path: str | None = None) -> Path:
@@ -58,11 +62,19 @@ def _load_config(raw_path: str | None = None) -> dict[str, str]:
     base_url = str(data.get("base_url") or "").strip().rstrip("/")
     token = str(data.get("token") or "").strip()
     owner_id = str(data.get("owner_id") or "").strip()
+    project_id = str(data.get("project_id") or "").strip()
     if not base_url or not token or not owner_id:
         raise RuntimeError("Config requires base_url, token, and owner_id")
     if not base_url.endswith("/memory"):
         base_url = f"{base_url}/memory"
-    return {"base_url": base_url, "token": token, "owner_id": owner_id}
+    return {"base_url": base_url, "token": token, "owner_id": owner_id, "project_id": project_id}
+
+
+def _resolve_project_id(config: dict[str, str]) -> str:
+    project_id = config.get("project_id", "").strip()
+    if project_id:
+        return project_id
+    return os.getenv("CF_MEM_PROJECT_ID", "").strip() or _DEFAULT_PROJECT_ID
 
 
 def _resolve_workspace_info(value: str | None) -> tuple[str, str] | None:
@@ -78,7 +90,10 @@ def _resolve_workspace_info(value: str | None) -> tuple[str, str] | None:
                 root = candidate
                 break
         if root is None:
-            return None
+            # No repo marker: the directory itself is still the project identity.
+            # Returning None here used to drop workspace_id entirely, leaving the
+            # extracted facts unattributable to any project.
+            root = current
         project_name = root.name
         digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
         return f"ws_{project_name}_{digest}", project_name
@@ -299,14 +314,16 @@ def _request_context(
     if workspace_info:
         params["workspace_id"] = workspace_info[0]
     query = urlencode(params)
-    return _http_get(f"{config['base_url']}/context?{query}", config["token"])
+    project_id = _resolve_project_id(config)
+    return _http_get(f"{config['base_url']}/context?{query}", config["token"], project_id)
 
 
-def _http_get(url: str, token: str, timeout: float = _DEFAULT_TIMEOUT) -> dict[str, Any]:
+def _http_get(url: str, token: str, project_id: str = "", timeout: float = _DEFAULT_TIMEOUT) -> dict[str, Any]:
     req = urllib.request.Request(
         url,
         headers={
             "Authorization": f"Bearer {token}",
+            **({"X-Project-Id": project_id} if project_id else {}),
             "User-Agent": _USER_AGENT,
         },
         method="GET",
@@ -321,13 +338,14 @@ def _http_get(url: str, token: str, timeout: float = _DEFAULT_TIMEOUT) -> dict[s
         return {}
 
 
-def _http_post(url: str, token: str, body: dict[str, Any], timeout: float = _DEFAULT_TIMEOUT) -> dict[str, Any]:
+def _http_post(url: str, token: str, body: dict[str, Any], project_id: str = "", timeout: float = _DEFAULT_TIMEOUT) -> dict[str, Any]:
     req = urllib.request.Request(
         url,
         data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
+            **({"X-Project-Id": project_id} if project_id else {}),
             "User-Agent": _USER_AGENT,
         },
         method="POST",
@@ -372,7 +390,8 @@ def handle_capture(source_app: str, config_path: str | None = None) -> int:
 
         ingest_succeeded = False
         try:
-            _http_post(f"{config['base_url']}/profile/ingest", config["token"], body)
+            project_id = _resolve_project_id(config)
+            _http_post(f"{config['base_url']}/profile/ingest", config["token"], body, project_id)
             ingest_succeeded = True
         except Exception:
             if not should_refresh:
@@ -390,6 +409,118 @@ def handle_capture(source_app: str, config_path: str | None = None) -> int:
                 pass
     except Exception:
         # Silent fail: never block prompt execution on hook error
+        pass
+    return 0
+
+
+_SECRET_RE = re.compile(
+    r"(?:sk-[A-Za-z0-9_-]{16,}"
+    r"|gh[pousr]_[A-Za-z0-9]{16,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|xox[abprs]-[A-Za-z0-9-]{10,}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})"
+)
+_SECRET_ASSIGN_RE = re.compile(
+    r"(?i)\b(api[_-]?key|secret|token|password|passwd|bearer)\b\s*[:=]\s*[\"']?([A-Za-z0-9_\-\.]{12,})[\"']?"
+)
+
+
+def _redact_secrets(text: str) -> str:
+    """Assistant replies quote configs and logs, so scrub credentials before upload."""
+    redacted = _SECRET_RE.sub("[REDACTED]", text)
+    return _SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+
+
+def _text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                value = block.get("text")
+                if isinstance(value, str) and value.strip():
+                    parts.append(value)
+        return "\n".join(parts)
+    return ""
+
+
+def _assistant_text_from_transcript(path_value: Any) -> str:
+    if not isinstance(path_value, str) or not path_value.strip():
+        return ""
+    try:
+        path = Path(path_value).expanduser()
+        if not path.is_file():
+            return ""
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            if size > _TRANSCRIPT_TAIL_BYTES:
+                f.seek(size - _TRANSCRIPT_TAIL_BYTES)
+                f.readline()  # discard the partial line the seek landed in
+            raw_lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    # Walk backwards: the final assistant turn is the conclusion worth keeping.
+    for raw in reversed(raw_lines):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message")
+        if event.get("type") == "assistant" and isinstance(message, dict):
+            text = _text_from_content(message.get("content"))
+            if text.strip():
+                return text
+    return ""
+
+
+def _extract_assistant_text(payload: dict[str, Any]) -> str:
+    for key in ("assistant_response", "last_assistant_message", "assistant_message"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+        if isinstance(val, dict):
+            text = _text_from_content(val.get("content"))
+            if text.strip():
+                return text
+    return _assistant_text_from_transcript(payload.get("transcript_path"))
+
+
+def handle_assistant_capture(source_app: str, config_path: str | None = None) -> int:
+    """Report the assistant's final turn so project facts can be extracted from it."""
+    try:
+        payload = _read_stdin_payload()
+        raw_text = _extract_assistant_text(payload)
+        if not raw_text.strip():
+            return 0
+
+        normalized = " ".join(_redact_secrets(raw_text).split())[:_MAX_CAPTURE_CHARS].strip()
+        # Short acknowledgements carry no durable fact and would only add noise.
+        if len(normalized) < _MIN_ASSISTANT_CAPTURE_CHARS:
+            return 0
+
+        config = _load_config(config_path)
+        workspace_info = _extract_workspace_info(payload)
+        body: dict[str, Any] = {
+            "text": normalized,
+            "role": "assistant",
+            "source_app": source_app,
+            "external_session_id": _extract_session_id(payload, source_app),
+        }
+        event_id = _extract_event_id(payload)
+        if event_id:
+            body["event_id"] = f"assistant:{event_id}"
+        if workspace_info:
+            body["workspace_id"], body["workspace_name"] = workspace_info
+
+        _http_post(f"{config['base_url']}/profile/ingest", config["token"], body, _resolve_project_id(config))
+    except Exception:
+        # Silent fail: never block the end of a turn on hook error.
         pass
     return 0
 
@@ -430,8 +561,18 @@ def main() -> None:
         help="Source app identifier",
     )
 
+    assistant_parser = subparsers.add_parser("hook-assistant", aliases=["assistant"])
+    assistant_parser.add_argument(
+        "--source-app",
+        default="codex",
+        choices=_SUPPORTED_SOURCE_APPS,
+        help="Source app identifier",
+    )
+
     args = parser.parse_args()
-    if args.command in ("hook-capture", "capture"):
+    if args.command in ("hook-assistant", "assistant"):
+        sys.exit(handle_assistant_capture(args.source_app, args.config))
+    elif args.command in ("hook-capture", "capture"):
         sys.exit(handle_capture(args.source_app, args.config))
     elif args.command in ("hook-context", "context"):
         sys.exit(handle_context(args.source_app, args.config))

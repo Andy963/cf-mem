@@ -1,8 +1,8 @@
 import type { ProjectScope } from "../project";
 import { clampInt } from "../utils";
 
-export const CLAIM_CATEGORIES = ["rule", "tool_insight", "user_profile", "domain_fact", "task_state"] as const;
-export const CLAIM_TYPES = ["preference", "instruction", "decision", "profile", "task_state"] as const;
+export const CLAIM_CATEGORIES = ["rule", "tool_insight", "user_profile", "domain_fact"] as const;
+export const CLAIM_TYPES = ["preference", "instruction", "decision", "profile"] as const;
 export const CLAIM_STATUSES = ["active", "superseded", "retracted", "proposed"] as const;
 export const CLAIM_PROVENANCES = ["user_explicit", "user_confirmed", "model_inferred"] as const;
 export const SCOPE_KINDS = ["project", "user", "session"] as const;
@@ -20,7 +20,6 @@ export function inferClaimCategory(
   applicability: ClaimApplicability | undefined,
   workspaceId: string | null,
 ): ClaimCategory {
-  if (type === "task_state") return "task_state";
   if (type === "profile") return "user_profile";
   if (
     type === "instruction"
@@ -37,7 +36,6 @@ export function inferClaimCategory(
 
 export function defaultClaimApplicability(category: ClaimCategory, workspaceId: string | null): ClaimApplicability {
   if (category === "user_profile") return "global";
-  if (category === "task_state") return "workspace";
   if (workspaceId && category !== "tool_insight") return "workspace";
   if (category === "rule") return "global";
   return "semantic";
@@ -91,14 +89,6 @@ export function validateClaimTaxonomy(
   applicability: ClaimApplicability,
   workspaceId: string | null,
 ): void {
-  if (type === "task_state" || category === "task_state") {
-    if (type !== "task_state" || category !== "task_state") {
-      throw new ClaimSchemaError("task_state claims must use the task_state category and type");
-    }
-    if (applicability !== "workspace") {
-      throw new ClaimSchemaError("task_state claims must use workspace applicability");
-    }
-  }
   if (type === "profile" && category !== "user_profile") {
     throw new ClaimSchemaError("profile claims must use the user_profile category");
   }
@@ -216,9 +206,6 @@ function parseClaim(value: unknown, projectScope: ProjectScope): ClaimInput {
     : requestedApplicability;
   const resolvedCategory = requestedCategory ?? inferClaimCategory(type, applicability, workspaceId);
   validateClaimTaxonomy(resolvedCategory, type, applicability, workspaceId);
-  if (resolvedCategory === "task_state" && (validUntil === null || validUntil <= Date.now())) {
-    throw new ClaimSchemaError("task_state claims require a future valid_until timestamp");
-  }
   if (validFrom !== null && validUntil !== null && validUntil < validFrom) {
     throw new ClaimSchemaError("claim.valid_until must be after claim.valid_from");
   }

@@ -6,7 +6,7 @@ export function corsHeaders(env: HttpEnv): Headers {
   const headers = new Headers();
   headers.set("Access-Control-Allow-Origin", env.CORS_ALLOW_ORIGIN ?? "*");
   headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Api-Key");
+  headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Api-Key,X-Project-Id");
   headers.set("Access-Control-Max-Age", "86400");
   headers.set("Access-Control-Allow-Credentials", "false");
   return headers;
@@ -42,12 +42,23 @@ export function getBearerToken(request: Request): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
+export function constantTimeEqual(left: string, right: string): boolean {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  const length = Math.max(leftBytes.length, rightBytes.length);
+  let difference = leftBytes.length ^ rightBytes.length;
+  for (let index = 0; index < length; index += 1) {
+    difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+  }
+  return difference === 0;
+}
+
 export function isAuthorized(request: Request, expectedToken: string): boolean {
   const bearerToken = getBearerToken(request);
-  if (bearerToken && bearerToken === expectedToken) return true;
+  if (bearerToken && constantTimeEqual(bearerToken, expectedToken)) return true;
 
   const apiKey = request.headers.get("X-Api-Key") ?? request.headers.get("x-api-key");
-  return Boolean(apiKey && apiKey === expectedToken);
+  return Boolean(apiKey && constantTimeEqual(apiKey, expectedToken));
 }
 
 export function unauthorizedResponse(env: HttpEnv, realm: string): Response {

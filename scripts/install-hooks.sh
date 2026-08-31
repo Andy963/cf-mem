@@ -12,6 +12,7 @@ TARGET_CLI=""
 OPT_BASE_URL=""
 OPT_TOKEN=""
 OPT_OWNER_ID=""
+OPT_PROJECT_ID=""
 
 usage() {
   cat <<'EOF'
@@ -23,6 +24,7 @@ Options:
   --base-url <url>    Base URL of cf-mem service (e.g. https://mem.example.com/memory)
   --token <token>     Bearer token for cf-mem authentication
   --owner-id <id>     Owner/user identifier
+  --project-id <id>   Optional fixed project id; otherwise use the shared personal project
   -h, --help          Show this help message
 
 Examples:
@@ -51,6 +53,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --owner-id)
       OPT_OWNER_ID="${2:-}"
+      shift 2
+      ;;
+    --project-id)
+      OPT_PROJECT_ID="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -86,7 +92,8 @@ import json
 data = {
     "base_url": "${OPT_BASE_URL}",
     "token": "${OPT_TOKEN}",
-    "owner_id": "${OPT_OWNER_ID}"
+    "owner_id": "${OPT_OWNER_ID}",
+    "project_id": "${OPT_PROJECT_ID}"
 }
 with open("${CONFIG_FILE}", "w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
@@ -163,6 +170,7 @@ def filter_hooks(groups):
 
 hooks["SessionStart"] = filter_hooks(hooks.get("SessionStart", []))
 hooks["UserPromptSubmit"] = filter_hooks(hooks.get("UserPromptSubmit", []))
+hooks["Stop"] = filter_hooks(hooks.get("Stop", []))
 
 hooks["SessionStart"].append({
     "matcher": "startup|resume|clear|compact",
@@ -182,6 +190,16 @@ hooks["UserPromptSubmit"].append({
             "type": "command",
             "command": f"python3 {script} hook-capture --source-app codex",
             "timeout": 15
+        }
+    ]
+})
+
+hooks["Stop"].append({
+    "hooks": [
+        {
+            "type": "command",
+            "command": f"python3 {script} hook-assistant --source-app codex",
+            "timeout": 20
         }
     ]
 })
@@ -243,6 +261,7 @@ def filter_hooks(groups):
 
 data["SessionStart"] = filter_hooks(data.get("SessionStart", []))
 data["UserPromptSubmit"] = filter_hooks(data.get("UserPromptSubmit", []))
+data["Stop"] = filter_hooks(data.get("Stop", []))
 
 data["SessionStart"].append({
     "matcher": "startup|resume|clear|compact",
@@ -261,6 +280,16 @@ data["UserPromptSubmit"].append({
             "type": "command",
             "command": f"python3 {script} hook-capture --source-app droid",
             "timeout": 15
+        }
+    ]
+})
+
+data["Stop"].append({
+    "hooks": [
+        {
+            "type": "command",
+            "command": f"python3 {script} hook-assistant --source-app droid",
+            "timeout": 20
         }
     ]
 })
@@ -327,6 +356,7 @@ def filter_hooks(groups):
 
 hooks["SessionStart"] = filter_hooks(hooks.get("SessionStart", []))
 hooks["UserPromptSubmit"] = filter_hooks(hooks.get("UserPromptSubmit", []))
+hooks["Stop"] = filter_hooks(hooks.get("Stop", []))
 
 hooks["SessionStart"].append({
     "matcher": "startup|resume|clear|compact|fork",
@@ -346,6 +376,16 @@ hooks["UserPromptSubmit"].append({
             "command": f"python3 {script} hook-capture --source-app claude",
             "timeout": 15,
             "async": True
+        }
+    ]
+})
+
+hooks["Stop"].append({
+    "hooks": [
+        {
+            "type": "command",
+            "command": f"python3 {script} hook-assistant --source-app claude",
+            "timeout": 20
         }
     ]
 })

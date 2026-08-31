@@ -10,3 +10,7 @@ pnpm-debug.log*
 .env
 .env.*
 wrangler.toml
+
+# Python bytecode from the client hook
+__pycache__/
+*.pyc

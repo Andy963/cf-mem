@@ -152,36 +152,13 @@ export async function fetchActiveClaimByIdentity(
   projectId: string,
   claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "category" | "type" | "subject" | "memoryKey" | "workspaceId">,
 ): Promise<StoredClaimRow | null> {
-  const now = Date.now();
   const result = await db
     .prepare(
-      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND subject = ? AND memory_key = ? AND COALESCE(workspace_id, '') = COALESCE(?, '') AND status = 'active' AND ((category != 'task_state' AND type != 'task_state') OR (category = 'task_state' AND type = 'task_state' AND valid_until > ?))`,
+      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND subject = ? AND memory_key = ? AND COALESCE(workspace_id, '') = COALESCE(?, '') AND status = 'active'`,
     )
-    .bind(projectId, claim.scopeKind, claim.scopeId, claim.category, claim.type, claim.subject, claim.memoryKey, claim.workspaceId, now)
+    .bind(projectId, claim.scopeKind, claim.scopeId, claim.category, claim.type, claim.subject, claim.memoryKey, claim.workspaceId)
     .first<StoredClaimRow>();
   return result ?? null;
-}
-
-/**
- * Finds an expired task-state identity before inserting its next version.
- * SQLite's active-identity index cannot express a time-dependent predicate, so
- * callers must replace the row and insert its next version in one D1 batch.
- */
-export async function fetchExpiredTaskStateClaim(
-  db: D1Database,
-  projectId: string,
-  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "category" | "type" | "subject" | "memoryKey" | "workspaceId">,
-  now: number = Date.now(),
-): Promise<StoredClaimRow | null> {
-  if (claim.category !== "task_state" && claim.type !== "task_state") return null;
-
-  const expired = await db
-    .prepare(
-      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND subject = ? AND memory_key = ? AND COALESCE(workspace_id, '') = COALESCE(?, '') AND status = 'active' AND valid_until IS NOT NULL AND valid_until <= ?`,
-    )
-    .bind(projectId, claim.scopeKind, claim.scopeId, claim.category, claim.type, claim.subject, claim.memoryKey, claim.workspaceId, now)
-    .first<StoredClaimRow>();
-  return expired ?? null;
 }
 
 export async function fetchActiveClaimsBySemanticScope(
@@ -192,7 +169,7 @@ export async function fetchActiveClaimsBySemanticScope(
 ): Promise<StoredClaimRow[]> {
   const result = await db
     .prepare(
-      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND COALESCE(workspace_id, '') = COALESCE(?, '') AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) AND ((category != 'task_state' AND type != 'task_state') OR (category = 'task_state' AND type = 'task_state' AND valid_until IS NOT NULL))`,
+      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND COALESCE(workspace_id, '') = COALESCE(?, '') AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?)`,
     )
     .bind(projectId, claim.scopeKind, claim.scopeId, claim.category, claim.type, claim.workspaceId, now, now)
     .all<StoredClaimRow>();
@@ -368,7 +345,7 @@ export async function fetchContextClaims(
   const priority = "CASE scope_kind WHEN 'user' THEN 0 WHEN 'project' THEN 1 WHEN 'session' THEN 2 ELSE 3 END";
   const result = await db
     .prepare(
-      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) AND ((category != 'task_state' AND type != 'task_state') OR (category = 'task_state' AND type = 'task_state' AND valid_until IS NOT NULL)) AND (applicability != 'workspace' OR workspace_id = ?) AND (${scopeConditions})${typeConditions}${categoryConditions} ORDER BY ${priority} ASC, updated_at DESC LIMIT ?`,
+      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) AND (applicability != 'workspace' OR workspace_id = ?) AND (${scopeConditions})${typeConditions}${categoryConditions} ORDER BY ${priority} ASC, updated_at DESC LIMIT ?`,
     )
     .bind(projectId, now, now, workspaceBinding, ...scopeBindings, ...typeBindings, ...categoryBindings, options.limit)
     .all<StoredClaimRow>();
@@ -502,7 +479,7 @@ export async function fetchOwnerClaims(
   const visibleScope = `(${ownerScope} OR ${projectRuleScope})`;
   const active = await db
     .prepare(
-      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND ${visibleScope} AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) AND ((category != 'task_state' AND type != 'task_state') OR (category = 'task_state' AND type = 'task_state' AND valid_until IS NOT NULL)) ORDER BY updated_at DESC LIMIT ?`,
+      `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND ${visibleScope} AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) ORDER BY updated_at DESC LIMIT ?`,
     )
     .bind(projectId, ownerId, ...workspaceBindings, projectId, ...workspaceBindings, Date.now(), Date.now(), activeLimit)
     .all<StoredClaimRow>();

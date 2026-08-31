@@ -7,46 +7,62 @@ README 只展示第一次部署需要的配置。本页收录所有可配置项�
 | 功能 | 最少需要配置 |
 | --- | --- |
 | Embedding 接口 | `API_TOKEN` |
-| 原始记忆 `/memory/index`、`/memory/search` | `PROJECT_TOKENS_JSON`，以及 D1 和 `cf-vector` |
+| 原始记忆 `/memory/index`、`/memory/search` | `MEMORY_API_TOKEN`（或回退 `API_TOKEN`）、`X-Project-Id`，以及 D1 和 `cf-vector` |
 | 持久记忆 Claims | D1、`cf-claims`，以及对应 metadata index |
-| 个人记忆自动提炼 | `PERSONAL_MEMORY_TOKEN`、`PERSONAL_MEMORY_OWNER_ID`、抽取器配置 |
+| 记忆自动提炼 | `PERSONAL_MEMORY_OWNER_ID`、抽取器配置；鉴权使用共享 token |
 | 网页抓取 | `TAVILY_API_TOKEN`、`TAVILY_BASE_URL` |
 | 管理后台 | Cloudflare Access、`ADMIN_ALLOWED_EMAIL` |
 | 搜索精排 | `RERANK_DEFAULT_ENABLED` 或请求体中的 `rerank.enabled` |
 
 ## 第一次部署
 
-只需要设置两个 secret：
+基础部署可暂时复用 `API_TOKEN`。生产建议为 memory 单独设置全局鉴权 token，便于独立轮换：
 
 ```bash
 npx wrangler secret put API_TOKEN
+npx wrangler secret put MEMORY_API_TOKEN
+```
+
+`/memory/*` 永远不从 token 推断项目。每个请求必须带项目头：
+
+```text
+Authorization: Bearer <shared-token>
+X-Project-Id: <project-id>
+```
+
+`MEMORY_API_TOKEN` 未设置时，当前版本暂时回退到 `API_TOKEN`，以保证迁移期间不中断；新部署
+应尽快设置前者。`ALLOWED_MEMORY_PROJECTS`（逗号分隔）建议设为已存在的项目，例如
+`personal,whisper,ads,cf-mem,study_copilot`，未知项目会返回 `403`。不要把 token 写进
+`wrangler.toml` 或提交到 Git。
+
+调用方项目 ID 的来源必须稳定且显式：共享 profile hook 默认发送 `personal`，也可以在
+`~/.config/cf-mem/config.json` 中填写固定的 `project_id`（只有明确需要项目专属 profile
+时才覆盖它）；Whisper 的 recall 使用 `RECALL_PROJECT_ID`，durable memory 使用
+`WHISPER_DURABLE_MEMORY_PROJECT_ID`（未设置时回退 `RECALL_PROJECT_ID`）。不要让服务端
+根据 token 猜测项目。
+
+Whisper 的 profile connector 也可以用 `WHISPER_PROFILE_MEMORY_PROJECT_ID` 覆盖默认的
+`personal`，但这会把跨工具共享画像切换到另一个项目，只有在明确需要时才设置。
+
+旧客户端迁移期间可以暂时保留旧 secret：
+
+```bash
 npx wrangler secret put PROJECT_TOKENS_JSON
 ```
 
-`PROJECT_TOKENS_JSON` 是项目 token 到项目 ID 的映射，例如：
-
-```json
-{"proj-a":"token-for-proj-a","proj-b":"token-for-proj-b"}
-```
-
-不要把 token 写进 `wrangler.toml` 或提交到 Git。
-
-如果只部署个人记忆，可以改用：
-
-```bash
-npx wrangler secret put PERSONAL_MEMORY_TOKEN
-```
-
-此时请求使用这个 token，并使用 `PERSONAL_MEMORY_PROJECT_ID` 指定的项目，默认项目 ID
-为 `personal`。`PERSONAL_MEMORY_TOKEN` 不能和 `PROJECT_TOKENS_JSON` 中的 token 重复。
+旧 token 现在只能作为临时凭据，并且必须带上与其原项目完全一致的 `X-Project-Id`；缺少项目头
+或项目不一致会失败，服务端不会再用 token 自动选择项目。所有客户端迁移到共享 token 后，
+删除 `PROJECT_TOKENS_JSON`、`PERSONAL_MEMORY_TOKEN` 和相关兼容配置。
 
 ## Secret
 
 | 名称 | 什么时候需要 | 说明 |
 | --- | --- | --- |
 | `API_TOKEN` | 使用 `/`、`/health`、`/embed`、`/v1/embeddings` 或 `/web/*` | Embedding 和网页接口共用的鉴权 token |
-| `PROJECT_TOKENS_JSON` | 使用项目级 `/memory/*` | JSON 对象，键是项目 ID，值是项目 token |
-| `PERSONAL_MEMORY_TOKEN` | 使用个人项目的 `/memory/*` | 单独的个人项目 token |
+| `MEMORY_API_TOKEN` | 使用项目级 `/memory/*` | 所有项目共用的全局鉴权 token；未设置时回退 `API_TOKEN` |
+| `ALLOWED_MEMORY_PROJECTS` | 限制项目访问范围 | 逗号分隔的项目 ID；留空表示允许所有合法项目 ID |
+| `PROJECT_TOKENS_JSON` | 迁移旧客户端 | 旧版凭据校验，仅作兼容兜底；不参与新路由 |
+| `PERSONAL_MEMORY_TOKEN` | 迁移旧客户端 | 旧版个人凭据，仅作兼容兜底；不参与新路由 |
 | `EXTRACTOR_LLM_API_KEY` | 使用个人记忆自动提炼 | 抽取、验证、对齐请求使用的模型 key |
 | `TAVILY_API_TOKEN` | 使用 Tavily 搜索、抓取或网页提取 | Tavily Worker 的访问 token |
 
@@ -58,8 +74,8 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 | --- | --- | --- |
 | `EMBEDDING_MODEL` | `@cf/baai/bge-m3` | Workers AI embedding 模型 |
 | `CORS_ALLOW_ORIGIN` | `*` | CORS 允许的来源；生产环境建议改成实际来源 |
-| `PERSONAL_MEMORY_PROJECT_ID` | `personal` | `PERSONAL_MEMORY_TOKEN` 对应的项目 ID |
-| `PERSONAL_MEMORY_OWNER_ID` | 无 | 开启 `/memory/profile/ingest` 时必填，用于个人记忆归属 |
+| `PERSONAL_MEMORY_PROJECT_ID` | `personal` | 旧版个人凭据绑定的项目 ID；仅兼容期使用 |
+| `PERSONAL_MEMORY_OWNER_ID` | 无 | 开启 `/memory/profile/ingest` 时必填，用于证据和提炼结果归属；兼容旧变量名 |
 | `TAVILY_BASE_URL` | 无 | Tavily Worker 地址，例如 `https://tavily.example.com` |
 | `RERANK_MODEL` | `@cf/baai/bge-reranker-base` | `/memory/search` 的精排模型 |
 | `RERANK_DEFAULT_ENABLED` | `false` | 是否默认开启精排；也可以只在请求中开启 |
@@ -73,7 +89,8 @@ npx wrangler secret put PERSONAL_MEMORY_TOKEN
 
 ## 个人记忆自动提炼
 
-以下变量和 secret 必须同时配置，`/memory/profile/ingest` 才能被 Cron 自动处理：
+以下变量和 secret 必须同时配置，`/memory/profile/ingest` 才能被 Cron 自动处理。请求项目由
+`X-Project-Id` 决定，不再限定为 `personal`：
 
 ```toml
 [vars]
@@ -84,7 +101,6 @@ PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
 ```
 
 ```bash
-npx wrangler secret put PERSONAL_MEMORY_TOKEN
 npx wrangler secret put EXTRACTOR_LLM_API_KEY
 ```
 

@@ -4,7 +4,6 @@ import {
   fetchClaimById,
   fetchClaimsByIds,
   fetchContextClaims,
-  fetchExpiredTaskStateClaim,
   fetchEvidenceByClaimIds,
   fetchGlobalProfileClaims,
   fetchToolInsightClaims,
@@ -165,9 +164,6 @@ async function createClaim(
   const execute = async (): Promise<StoredClaimRow> => {
     const now = Date.now();
     const claimId = newClaimId();
-    const expiredTaskState = claim.provenance === "model_inferred"
-      ? null
-      : await fetchExpiredTaskStateClaim(db, projectScope.projectId, claim, now);
     const current = await fetchActiveClaimByIdentity(db, projectScope.projectId, claim);
     const isSameValue = (stored: StoredClaimRow) =>
       stored.value_json === JSON.stringify(claim.value) && stored.canonical_text === claim.canonicalText;
@@ -193,14 +189,6 @@ async function createClaim(
         // replacement. They remain proposed until explicitly confirmed.
         await insertClaimWithEvidence(db, projectScope.projectId, claimId, claim, "proposed", now);
       } else {
-        if (expiredTaskState) {
-          // The expired active row still occupies the identity index. Replace it
-          // atomically with the new version so a failed insert cannot leave a
-          // dangling superseded_by pointer.
-          await replaceActiveClaim(db, projectScope.projectId, expiredTaskState.id, claimId, claim, now);
-          await syncClaimVector(env, { ...expiredTaskState, status: "superseded", superseded_by: claimId, updated_at: now });
-          return await requireClaim(db, projectScope.projectId, claimId);
-        }
         // No identity twin under the canonical key. LLM extractors rephrase the
         // same fact across runs, so check for a semantic twin before inserting.
         const semantic = await resolveSemanticDuplicate(
@@ -226,12 +214,7 @@ async function createClaim(
       }
     } else {
       if (!current) {
-        if (!expiredTaskState) {
-          throw new ClaimSchemaError("Cannot supersede because no active claim exists for this canonical key");
-        }
-        await replaceActiveClaim(db, projectScope.projectId, expiredTaskState.id, claimId, claim, now);
-        await syncClaimVector(env, { ...expiredTaskState, status: "superseded", superseded_by: claimId, updated_at: now });
-        return await requireClaim(db, projectScope.projectId, claimId);
+        throw new ClaimSchemaError("Cannot supersede because no active claim exists for this canonical key");
       }
       if (isSameValue(current)) {
         await reinforceClaim(db, projectScope.projectId, current.id, claim.confidence, now);
@@ -304,15 +287,10 @@ function isApplicableContextClaim(
   if (claim.status !== "active") return false;
   if (claim.valid_from !== null && claim.valid_from > now) return false;
   if (claim.valid_until !== null && claim.valid_until <= now) return false;
-  if (claim.category === "task_state" || claim.type === "task_state") {
-    if (claim.valid_until === null || claim.valid_until <= now) return false;
-    // Task state is a resumable workspace handoff, not a project-wide fact.
-    // Enforce the current taxonomy at the routing boundary as well, so legacy
-    // rows written before the category migration cannot leak across workspaces.
-    if (claim.applicability !== "workspace" || !request.workspaceId || claim.workspace_id !== request.workspaceId) {
-      return false;
-    }
-  }
+  // task_state was removed from the taxonomy. Migration 0019 retracts the
+  // historical rows; this guard keeps any survivor out of the context entirely
+  // instead of letting it fall through to generic routing.
+  if ((claim.category as string) === "task_state" || (claim.type as string) === "task_state") return false;
   if (request.types && !request.types.includes(claim.type)) return false;
   if (claim.applicability === "workspace" && (!request.workspaceId || claim.workspace_id !== request.workspaceId)) return false;
   if (claim.scope_kind === "project") return claim.scope_id === projectScope.projectId;
@@ -349,7 +327,7 @@ function profileMinimumScore(env: Env): number {
 
 const MAX_D1_SEMANTIC_FALLBACK_CLAIMS = 500;
 const SEMANTIC_FALLBACK_BATCH_SIZE = 32;
-const LEGACY_CONTEXT_CATEGORIES: ClaimCategory[] = ["rule", "user_profile", "domain_fact", "task_state"];
+const LEGACY_CONTEXT_CATEGORIES: ClaimCategory[] = ["rule", "user_profile", "domain_fact"];
 
 interface SemanticContextMatch {
   claim: StoredClaimRow;
@@ -526,21 +504,6 @@ export async function loadMemoryContext(
           );
         }
       }
-    }
-
-    if (categoriesSet.has("task_state")) {
-      const taskStates = await fetchContextClaims(db, projectScope.projectId, {
-        userId: request.userId,
-        sessionId: request.sessionId,
-        types: ["task_state"],
-        categories: ["task_state"],
-        workspaceId: request.workspaceId,
-        includeProject: false,
-        limit: request.limit,
-      });
-      deterministicClaims.push(
-        ...taskStates.filter((claim) => claim.category === "task_state" && isApplicableContextClaim(claim, projectScope, request, now)),
-      );
     }
 
     const routedDeterministicClaims = deterministicClaims.filter((claim) =>

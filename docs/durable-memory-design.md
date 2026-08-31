@@ -41,8 +41,8 @@
 | `id` | 稳定的 claim 标识符 |
 | `project_id` | 强制隔离键 |
 | `scope_kind`, `scope_id` | 归属 scope：`project`、`user` 或 `session` |
-| `category` | `rule`、`tool_insight`、`user_profile`、`domain_fact` 或 `task_state` |
-| `type` | `preference`、`instruction`、`decision`、`profile` 或 `task_state` |
+| `category` | `rule`、`tool_insight`、`user_profile` 或 `domain_fact` |
+| `type` | `preference`、`instruction`、`decision` 或 `profile` |
 | `subject`, `memory_key` | 用于合并的规范身份键 |
 | `value_json`, `canonical_text` | 机器可读的值 + Agent 可读的文本 |
 | `status` | `active`、`superseded`、`retracted` 或 `proposed` |
@@ -78,9 +78,8 @@ claim 对 claim 的替换用 `memory_claims.superseded_by` 表示。证据关联
 
 ## 分类路由与生命周期
 
-Claims 按五类路由：`rule` 用于全局或工作区行为约束，`tool_insight` 按工具名称
-（`scope_id`）局部挂载，`user_profile` 用于用户画像，`domain_fact` 只在有实际查询时做语义召回，
-`task_state` 只返回当前 scope 内且未过期的任务断点。
+Claims 按四类路由：`rule` 用于全局或工作区行为约束，`tool_insight` 按工具名称
+（`scope_id`）局部挂载，`user_profile` 用于用户画像，`domain_fact` 只在有实际查询时做语义召回。
 
 `domain_fact` 与 `user_profile` 的响应包含动态 `active_score`：
 
@@ -88,8 +87,7 @@ Claims 按五类路由：`rule` 用于全局或工作区行为约束，`tool_ins
 
 其中 `deltaDays` 从 `last_used_at`（没有使用记录时回退到 `created_at`）计算。当前实现将该值
 作为召回与审计指标返回，未增加 `archived` 状态或自动归档迁移；现有状态机仍只有
-`active`、`superseded`、`retracted` 和 `proposed`。`task_state` 必须带有未来的 `valid_until`，
-上下文查询会过滤已过期状态。
+`active`、`superseded`、`retracted` 和 `proposed`。
 
 同一分类和语义 scope 内，`rule` 与 `tool_insight` 的参数更新或冲突会自动创建新版本并将旧版本
 标记为 `superseded`；其他分类仍需显式允许替换或在冲突时停止，避免静默覆盖事实。
@@ -107,7 +105,7 @@ Claims 按五类路由：`rule` 用于全局或工作区行为约束，`tool_ins
 - `supersede`：创建替代 claim，并把同一 canonical key 的旧 active claim 标记为 superseded。
 - `retract`：把指定的 active claim 标记为 retracted。
 
-所有变更都由 Worker 校验并受项目 token 限制。自动化客户端必须把证据上报到
+所有变更都由 Worker 校验并受共享 token 与 `X-Project-Id` 限制。自动化客户端必须把证据上报到
 `POST /memory/extraction/ingest`，候选提取、验证和自动变更 claim 都由 Worker 负责。
 `POST /memory/claims` 只保留给显式授权的管理操作。
 

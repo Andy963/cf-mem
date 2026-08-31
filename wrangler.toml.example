@@ -28,6 +28,8 @@ index_name = "cf-claims"
 
 [vars]
 CORS_ALLOW_ORIGIN = "*"
+# Optional allowlist for explicit memory project headers.
+# ALLOWED_MEMORY_PROJECTS = "personal,whisper,ads,cf-mem,study_copilot"
 # The /admin dashboard requires Cloudflare Access plus this allowed email.
 # Set workers_dev = false in production so the dashboard cannot bypass Access
 # through the worker's workers.dev address.
@@ -41,7 +43,6 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # EXTRACTOR_LLM_API_BASE = "https://your-openai-compatible-endpoint/v1"
 # EXTRACTOR_LLM_MODEL = "your-model"
 # PROFILE_EXTRACTOR_PROTOCOL = "chat_completions"
-# PERSONAL_MEMORY_PROJECT_ID = "personal"
 # PERSONAL_MEMORY_OWNER_ID = "your-owner-id"
 # TAVILY_BASE_URL = "https://tavily.example.com"
 # Claim semantic deduplication (optional): the claims metadata indexes should
@@ -52,8 +53,11 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # CLAIM_DEDUP_TOP_K = "12"
 # CLAIM_DEDUP_LLM_ENABLED = "true"
 # CLAIM_DEDUP_AUTO_REPLACE = "false"
-# /memory/* requires a PROJECT_TOKENS_JSON secret such as:
-# {"proj-a":"token-for-a","proj-b":"token-for-b"}
+# /memory/* uses MEMORY_API_TOKEN (or API_TOKEN as fallback) plus the
+# required X-Project-Id request header. ALLOWED_MEMORY_PROJECTS is recommended
+# so an unknown project id fails closed instead of creating a new namespace.
+# PROJECT_TOKENS_JSON and PERSONAL_MEMORY_TOKEN are migration-only credentials;
+# they never select a project and should be removed after client migration.
 # Extractor LLM also needs this secret:
 #   EXTRACTOR_LLM_API_KEY
 # Web extraction via the Tavily relay also needs secrets:
