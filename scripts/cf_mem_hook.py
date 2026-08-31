@@ -35,7 +35,13 @@ _STATE_MAX_SESSIONS = 512
 _REFRESH_TURN_THRESHOLD = 32
 _REFRESH_TOKEN_THRESHOLD = 256_000
 _DEFAULT_PROJECT_ID = "personal"
-_MIN_ASSISTANT_CAPTURE_CHARS = 80
+# Drop only bare acknowledgements. A character bar cannot separate signal from
+# noise across languages -- "结论：迁移必须先在 local D1 验证再上生产。" is a durable
+# fact in 26 characters while an English acknowledgement runs to 29 -- and the
+# server already applies trivial detection, the extractor skip list and a
+# verifier. Over-reporting costs one extraction call; over-filtering silently
+# loses the fact.
+_MIN_ASSISTANT_CAPTURE_CHARS = 20
 _TRANSCRIPT_TAIL_BYTES = 512_000
 # Anything under a temp root disappears on reboot, so the whole subtree is
 # disqualified. Both the symlinked and resolved macOS spellings are listed:
