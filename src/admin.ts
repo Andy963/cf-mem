@@ -2,6 +2,7 @@ import type { Env } from "./env";
 import type { StoredClaimRow } from "./db/d1";
 import { jsonResponse, parseJson, textResponse } from "./api/http";
 import { syncClaimVector } from "./memory/claim-index";
+import { CLAIM_CATEGORIES, type ClaimCategory } from "./memory/claims";
 import {
   DEFAULT_EXTRACTOR_INSTRUCTIONS,
   DEFAULT_VERIFIER_INSTRUCTIONS,
@@ -76,6 +77,7 @@ interface ClaimAuditRow {
 interface ClaimListFilters {
   page: number;
   projectId: string | null;
+  category: ClaimCategory | null;
   status: (typeof CLAIM_STATUSES)[number] | null;
   type: (typeof CLAIM_TYPES)[number] | null;
   search: string | null;
@@ -321,6 +323,7 @@ function parseClaimListFilters(url: URL): ClaimListFilters {
   return {
     page,
     projectId,
+    category: parseChoice("category", CLAIM_CATEGORIES),
     status: parseChoice("status", CLAIM_STATUSES),
     type: parseChoice("type", CLAIM_TYPES),
     search,
@@ -333,6 +336,10 @@ function claimWhere(filters: ClaimListFilters): { where: string; bindings: Array
   if (filters.projectId) {
     where.push("project_id = ?");
     bindings.push(filters.projectId);
+  }
+  if (filters.category) {
+    where.push("category = ?");
+    bindings.push(filters.category);
   }
   if (filters.status) {
     where.push("status = ?");
@@ -424,7 +431,7 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       return jsonResponse(env, { ok: true, ...(await listAdminClaims(env, parseClaimListFilters(url))) }, { headers: { "Cache-Control": "no-store" } });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to load claims";
-      const status = ["page must be a positive integer", "project_id is too long", "q is too long", "status is invalid", "type is invalid"].includes(message) ? 400 : 502;
+      const status = ["page must be a positive integer", "project_id is too long", "q is too long", "category is invalid", "status is invalid", "type is invalid"].includes(message) ? 400 : 502;
       if (status === 502) console.error(`[admin] claims failed: ${message}`);
       return jsonResponse(env, { error: { message } }, { status });
     }
@@ -567,7 +574,7 @@ const DASHBOARD_HTML = `<!doctype html>
     .empty { color: #9fb0c2; padding: 24px 20px; }
     .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 20px; border-bottom: 1px solid #293746; }
     .section-heading h2 { border: 0; padding: 0; }
-    .filters { display: grid; grid-template-columns: minmax(180px, 1.4fr) repeat(3, minmax(120px, .6fr)) auto; gap: 12px; padding: 16px 20px; border-bottom: 1px solid #293746; }
+    .filters { display: grid; grid-template-columns: minmax(180px, 1.4fr) repeat(4, minmax(120px, .6fr)) auto; gap: 12px; padding: 16px 20px; border-bottom: 1px solid #293746; }
     input, select { width: 100%; min-height: 40px; color: #edf3fa; border: 1px solid #426271; border-radius: 8px; background: #161f2a; padding: 8px 10px; font: inherit; }
     input:focus, select:focus { outline: 3px solid #6ed2bc; outline-offset: 2px; border-color: #6ed2bc; }
     .claim-button { width: 100%; border: 0; border-radius: 0; padding: 0; color: #edf3fa; background: transparent; font: inherit; font-weight: 600; text-align: left; }
@@ -645,11 +652,12 @@ const DASHBOARD_HTML = `<!doctype html>
       <form class="filters" id="claim-filters">
         <input id="claim-query" type="search" placeholder="Search claim text, subject, or key" aria-label="Search claims">
         <select id="claim-project" aria-label="Filter by project"><option value="">All projects</option></select>
+        <select id="claim-category" aria-label="Filter by category"><option value="">All categories</option><option value="rule">Rule</option><option value="tool_insight">Tool insight</option><option value="user_profile">User profile</option><option value="domain_fact">Domain fact</option></select>
         <select id="claim-status" aria-label="Filter by status"><option value="">All statuses</option><option value="active">Active</option><option value="proposed">Proposed</option><option value="superseded">Superseded</option><option value="retracted">Retracted</option></select>
         <select id="claim-type" aria-label="Filter by type"><option value="">All types</option><option value="preference">Preference</option><option value="instruction">Instruction</option><option value="decision">Decision</option><option value="profile">Profile</option></select>
         <button type="submit">Filter</button>
       </form>
-      <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Type / scope</th><th>Status</th><th>Confidence</th><th>Used</th><th>Updated</th><th>Operations</th></tr></thead><tbody id="claim-rows"></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>Claim</th><th>Category / type / scope</th><th>Status</th><th>Confidence</th><th>Used</th><th>Updated</th><th>Operations</th></tr></thead><tbody id="claim-rows"></tbody></table></div>
       <div class="pager"><span id="page-label">—</span><div><button type="button" id="previous-page">Previous</button><button type="button" id="next-page">Next</button></div></div>
     </section>
     <section class="table-card" id="prompt-section" aria-labelledby="prompt-title">
@@ -705,6 +713,7 @@ const DASHBOARD_HTML = `<!doctype html>
       return {
         q: document.getElementById("claim-query").value.trim(),
         project_id: document.getElementById("claim-project").value,
+        category: document.getElementById("claim-category").value,
         status: document.getElementById("claim-status").value,
         type: document.getElementById("claim-type").value,
       };
@@ -766,7 +775,7 @@ const DASHBOARD_HTML = `<!doctype html>
           const text = document.createElement("div"); text.className = "claim-text"; text.textContent = claim.canonical_text;
           const meta = document.createElement("div"); meta.className = "claim-meta"; meta.textContent = claim.subject + " · " + claim.memory_key;
           button.append(text, meta, labels(splitLabels(claim.tags), "tag")); claimCell.append(button); row.append(claimCell);
-          const typeCell = createCell(claim.type + " · " + claim.scope_kind); typeCell.append(document.createElement("br"), labels(splitLabels(claim.sources), "source")); row.append(typeCell);
+          const typeCell = createCell(claim.category + " · " + claim.type + " · " + claim.scope_kind); typeCell.append(document.createElement("br"), labels(splitLabels(claim.sources), "source")); row.append(typeCell);
           const statusCell = document.createElement("td"); statusCell.append(badge(claim.status)); row.append(statusCell);
           row.append(createCell((claim.confidence * 100).toFixed(0) + "%"));
           row.append(createCell(String(claim.use_count ?? 0) + (claim.last_used_at ? " · " + formatDate(claim.last_used_at) : " · never")));
@@ -802,7 +811,7 @@ const DASHBOARD_HTML = `<!doctype html>
         try { value = JSON.stringify(JSON.parse(value), null, 2); } catch {}
         detail.replaceChildren();
         const metadata = document.createElement("dl"); metadata.className = "detail-grid";
-        for (const [label, value] of [["Project", claim.project_id], ["Scope", claim.scope_kind + " · " + claim.scope_id], ["Type", claim.type], ["Status", claim.status], ["Confidence", (claim.confidence * 100).toFixed(0) + "%"], ["Provenance", claim.provenance], ["Applicability", claim.applicability], ["Used", String(claim.use_count ?? 0) + (claim.last_used_at ? " · " + formatDate(claim.last_used_at) : " · never")], ["Updated", formatDate(claim.updated_at)]]) {
+        for (const [label, value] of [["Project", claim.project_id], ["Scope", claim.scope_kind + " · " + claim.scope_id], ["Category", claim.category], ["Type", claim.type], ["Status", claim.status], ["Confidence", (claim.confidence * 100).toFixed(0) + "%"], ["Provenance", claim.provenance], ["Applicability", claim.applicability], ["Used", String(claim.use_count ?? 0) + (claim.last_used_at ? " · " + formatDate(claim.last_used_at) : " · never")], ["Updated", formatDate(claim.updated_at)]]) {
           const term = document.createElement("dt"); term.textContent = label;
           const description = document.createElement("dd"); description.textContent = value;
           metadata.append(term, description);
