@@ -1,5 +1,6 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { handleMemoryRequest } from "../src/api/memory";
 import type { StoredClaimRow } from "../src/db/d1";
 import type { Env } from "../src/env";
 import { loadMemoryContext } from "../src/memory/claim-store";
@@ -88,6 +89,7 @@ describe("loadMemoryContext semantic retrieval", () => {
       SEGMENTS_INDEX: {},
       CLAIMS_INDEX: {},
     } as unknown as Env;
+    const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
 
     const result = await loadMemoryContext(
       env,
@@ -103,11 +105,75 @@ describe("loadMemoryContext semantic retrieval", () => {
         workspaceId: null,
         profileOnly: false,
       },
+      ctx,
     );
 
     expect(result.claims).toHaveLength(3);
     expect(ai.run).toHaveBeenCalledOnce();
     expect(mocks.fetchContextClaims).not.toHaveBeenCalled();
     expect(mocks.fetchClaimsByIds).toHaveBeenCalled();
+  });
+
+  it("returns before the usage update completes and keeps the update in waitUntil", async () => {
+    const claimIds = ["claim-usage-1", "claim-usage-2", "claim-usage-3"];
+    mocks.findVectorizedClaimMatches.mockResolvedValue(claimIds.map((id, index) => ({
+      id,
+      score: 0.91 - index * 0.05,
+    })));
+    mocks.fetchClaimsByIds.mockResolvedValue(new Map(claimIds.map((id) => [id, createClaim(id)])));
+
+    let releaseUsageUpdate!: () => void;
+    const usageUpdate = new Promise<{ meta: { changes: number } }>((resolve) => {
+      releaseUsageUpdate = () => resolve({ meta: { changes: claimIds.length } });
+    });
+    const run = vi.fn(() => usageUpdate);
+    const db = {
+      prepare: vi.fn(() => ({
+        bind: vi.fn(() => ({ run })),
+      })),
+    } as unknown as D1Database;
+    const ai = {
+      run: vi.fn(async () => ({ data: [[1, 0]] })),
+    } as unknown as Ai;
+    const env = {
+      AI: ai,
+      DB: db,
+      SEGMENTS_INDEX: {},
+      CLAIMS_INDEX: {},
+    } as unknown as Env;
+    const backgroundPromises: Promise<void>[] = [];
+    const waitUntil = vi.fn((promise: Promise<void>) => {
+      backgroundPromises.push(promise);
+    });
+    const ctx = { waitUntil } as unknown as ExecutionContext;
+    const request = new Request(
+      "https://example.com/memory/context?categories=domain_fact&query=What%20claims%20does%20this%20project%20have%3F&limit=20",
+    );
+    const responsePromise = handleMemoryRequest(
+      request,
+      env,
+      { projectId: "project-1", namespace: "project:project-1" },
+      ctx,
+    );
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const responseOrTimeout = await Promise.race([
+      responsePromise,
+      new Promise<"timed-out">((resolve) => {
+        timeoutHandle = setTimeout(() => resolve("timed-out"), 100);
+      }),
+    ]);
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+
+    expect(responseOrTimeout).not.toBe("timed-out");
+    expect(responseOrTimeout).toBeInstanceOf(Response);
+    const response = responseOrTimeout as Response;
+    const body = await response.json() as { claims: unknown[] };
+    expect(body.claims).toHaveLength(claimIds.length);
+    expect(waitUntil).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
+    expect(backgroundPromises).toHaveLength(1);
+
+    releaseUsageUpdate();
+    await backgroundPromises[0];
   });
 });

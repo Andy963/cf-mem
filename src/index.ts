@@ -39,7 +39,7 @@ function getRequiredApiToken(env: Pick<Env, "API_TOKEN">): string | null {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const method = request.method.toUpperCase();
     const url = new URL(request.url);
 
@@ -69,7 +69,7 @@ export default {
       try {
         const projectScope = resolveProjectScope(request, env);
         await validateRequestProjectId(request, projectScope.projectId);
-        return await handleMemoryRequest(request, env, projectScope);
+        return await handleMemoryRequest(request, env, projectScope, ctx);
       } catch (error) {
         if (error instanceof RequestAuthError) {
           if (error.status === 401) {

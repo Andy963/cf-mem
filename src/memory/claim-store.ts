@@ -60,9 +60,9 @@ function usageKey(projectId: string, claimId: string): string {
 
 /**
  * Records that the given claims were just injected into an agent turn.
- * Awaited by the caller: the chunked UPDATEs must complete before the Worker
- * response ends — a fire-and-forget promise gets killed when the fetch handler
- * returns, silently losing usage data.
+ * Callers schedule the chunked UPDATEs with ExecutionContext.waitUntil so the
+ * response does not wait on usage telemetry while the Worker keeps the work
+ * alive after returning it.
  */
 export async function recordClaimUsage(env: Env, projectId: string, claimIds: string[]): Promise<void> {
   if (claimIds.length === 0) return;
@@ -475,6 +475,7 @@ export async function loadMemoryContext(
   env: Env,
   projectScope: ProjectScope,
   request: ContextRequest,
+  ctx: ExecutionContext,
 ): Promise<{ project_id: string; claims: Array<Record<string, unknown>> }> {
   const db = env.DB;
   const now = Date.now();
@@ -548,7 +549,8 @@ export async function loadMemoryContext(
     const claims = selectRoutedClaims(routedDeterministicClaims, semanticClaims, request.categories, request.limit);
 
     const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, claims.map((claim) => claim.id));
-    await recordClaimUsage(env, projectScope.projectId, claims.map((claim) => claim.id));
+    // Usage feedback is telemetry and must not delay the context response.
+    ctx.waitUntil(recordClaimUsage(env, projectScope.projectId, claims.map((claim) => claim.id)));
     return {
       project_id: projectScope.projectId,
       claims: claims.map((claim) => ({
@@ -602,9 +604,8 @@ export async function loadMemoryContext(
     })
     .slice(0, request.limit);
   const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, claims.map((claim) => claim.id));
-  // Usage feedback: these claims are about to be injected into an agent turn.
-  // Awaited (cheap single UPDATE) so it completes before the response ends.
-  await recordClaimUsage(env, projectScope.projectId, claims.map((claim) => claim.id));
+  // Usage feedback is telemetry and must not delay the context response.
+  ctx.waitUntil(recordClaimUsage(env, projectScope.projectId, claims.map((claim) => claim.id)));
   return {
     project_id: projectScope.projectId,
     claims: claims.map((claim) => ({
