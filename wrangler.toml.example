@@ -67,4 +67,4 @@ RERANK_MODEL = "@cf/baai/bge-reranker-base"
 #   TAVILY_BASE_URL is a normal variable above, not a secret.
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/15 * * * *"]

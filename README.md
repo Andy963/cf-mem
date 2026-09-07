@@ -233,7 +233,7 @@ npx wrangler vectorize list-metadata-index cf-claims
 npm run deploy
 ```
 
-Worker 每五分钟执行一次 Cron，用于处理个人记忆提炼任务和清理过期原始记忆。
+Worker 每十五分钟执行一次 Cron，用于处理个人记忆提炼任务和清理过期原始记忆。
 Nudge 会将没有角色标记的 `kind: "user"` 原始文本作为用户证据处理；混合角色文本仍只提取 `[user]` 内容。
 Nudge 处理带前缀的 `session_id` 时按实际分隔符提取外部 Session ID，不依赖 `source_app` 的字符串长度。
 显式 extraction ingest 和 profile ingest flush 在成功入队后也会标记相关 Segment，避免 Nudge 重复拾取。
