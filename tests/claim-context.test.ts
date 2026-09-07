@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleMemoryRequest } from "../src/api/memory";
 import type { StoredClaimRow } from "../src/db/d1";
 import type { Env } from "../src/env";
-import { loadMemoryContext } from "../src/memory/claim-store";
+import { loadMemoryContext, recordClaimUsage } from "../src/memory/claim-store";
 
 const mocks = vi.hoisted(() => ({
   fetchClaimsByIds: vi.fn(),
@@ -175,5 +175,55 @@ describe("loadMemoryContext semantic retrieval", () => {
 
     releaseUsageUpdate();
     await backgroundPromises[0];
+  });
+
+  it("uses the durable last-used timestamp to debounce usage across requests", async () => {
+    const now = 1_700_000_000_000;
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(now);
+    let useCount = 0;
+    let lastUsedAt: number | null = null;
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const db = {
+      prepare(sql: string) {
+        const statement = { sql, values: [] as unknown[] };
+        statements.push(statement);
+        return {
+          bind(...values: unknown[]) {
+            statement.values = values;
+            return {
+              async run() {
+                const timestamp = Number(values[0]);
+                const cutoff = Number(values[values.length - 1]);
+                if (lastUsedAt === null || lastUsedAt <= cutoff) {
+                  useCount += 1;
+                  lastUsedAt = timestamp;
+                  return { meta: { changes: 1 } };
+                }
+                return { meta: { changes: 0 } };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database;
+    const env = { DB: db } as unknown as Env;
+
+    try {
+      await recordClaimUsage(env, "project-1", ["claim-usage-1", "claim-usage-1"]);
+      await recordClaimUsage(env, "project-1", ["claim-usage-1"]);
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    expect(statements).toHaveLength(2);
+    expect(statements[0]?.sql).toContain("last_used_at IS NULL OR last_used_at <= ?");
+    expect(statements[0]?.values).toEqual([
+      now,
+      "project-1",
+      "claim-usage-1",
+      now - 10 * 60 * 1000,
+    ]);
+    expect(useCount).toBe(1);
+    expect(lastUsedAt).toBe(now);
   });
 });

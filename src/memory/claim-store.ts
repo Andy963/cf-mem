@@ -45,18 +45,7 @@ function newClaimId(): string {
   return `claim_${crypto.randomUUID()}`;
 }
 
-// Usage feedback: last usage timestamp recorded per claim id within this
-// isolate's lifetime. Workers are ephemeral, so this is a soft dedup — it
-// collapses bursts within a minute but a cold isolate records again. That is
-// the right trade-off: exact counting is not needed, only the ability to tell
-// “never used” from “used recently”, and collapsing bursts keeps the write
-// volume proportional to distinct turns rather than every chunk injection.
-const USAGE_RECORD_DEDUP_MS = 60_000;
-const lastUsageRecordedAt = new Map<string, number>();
-
-function usageKey(projectId: string, claimId: string): string {
-  return `${projectId}\n${claimId}`;
-}
+const USAGE_RECORD_DEDUP_MS = 10 * 60 * 1000;
 
 /**
  * Records that the given claims were just injected into an agent turn.
@@ -65,29 +54,19 @@ function usageKey(projectId: string, claimId: string): string {
  * alive after returning it.
  */
 export async function recordClaimUsage(env: Env, projectId: string, claimIds: string[]): Promise<void> {
-  if (claimIds.length === 0) return;
+  const uniqueClaimIds = [...new Set(claimIds)];
+  if (uniqueClaimIds.length === 0) return;
   const now = Date.now();
-  // Keep the soft-dedup map bounded; entries older than the dedup window are
-  // dead weight once their row is written.
-  for (const [key, ts] of lastUsageRecordedAt) {
-    if (now - ts >= USAGE_RECORD_DEDUP_MS) lastUsageRecordedAt.delete(key);
-  }
-  const fresh = [...new Set(claimIds)].filter((id) => {
-    const last = lastUsageRecordedAt.get(usageKey(projectId, id));
-    return last === undefined || now - last >= USAGE_RECORD_DEDUP_MS;
-  });
-  if (fresh.length === 0) return;
-  for (const chunk of chunkArray(fresh, 50)) {
+  const cutoff = now - USAGE_RECORD_DEDUP_MS;
+  for (const chunk of chunkArray(uniqueClaimIds, 50)) {
     try {
       const placeholders = chunk.map(() => "?").join(",");
       await env.DB.prepare(
-        `UPDATE memory_claims SET use_count = use_count + 1, last_used_at = ? WHERE project_id = ? AND id IN (${placeholders})`,
-      ).bind(now, projectId, ...chunk).run();
-      // Only suppress a duplicate after the corresponding D1 write succeeds.
-      for (const id of chunk) lastUsageRecordedAt.set(usageKey(projectId, id), now);
+        `UPDATE memory_claims SET use_count = use_count + 1, last_used_at = ? WHERE project_id = ? AND id IN (${placeholders}) AND (last_used_at IS NULL OR last_used_at <= ?)`,
+      ).bind(now, projectId, ...chunk, cutoff).run();
     } catch {
       // Usage stats must never break recall. A failed chunk remains eligible for
-      // a later request instead of being lost behind the soft-dedup map.
+      // a later request because the database update is conditional.
     }
   }
 }
