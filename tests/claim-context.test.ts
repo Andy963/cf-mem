@@ -1,0 +1,113 @@
+import type { D1Database } from "@cloudflare/workers-types";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { StoredClaimRow } from "../src/db/d1";
+import type { Env } from "../src/env";
+import { loadMemoryContext } from "../src/memory/claim-store";
+
+const mocks = vi.hoisted(() => ({
+  fetchClaimsByIds: vi.fn(),
+  fetchContextClaims: vi.fn(),
+  fetchEvidenceByClaimIds: vi.fn(),
+  findVectorizedClaimMatches: vi.fn(),
+}));
+
+vi.mock("../src/db/d1", async () => {
+  const actual = await vi.importActual<typeof import("../src/db/d1")>("../src/db/d1");
+  return {
+    ...actual,
+    fetchClaimsByIds: mocks.fetchClaimsByIds,
+    fetchContextClaims: mocks.fetchContextClaims,
+    fetchEvidenceByClaimIds: mocks.fetchEvidenceByClaimIds,
+  };
+});
+
+vi.mock("../src/memory/claim-index", async () => {
+  const actual = await vi.importActual<typeof import("../src/memory/claim-index")>("../src/memory/claim-index");
+  return {
+    ...actual,
+    findVectorizedClaimMatches: mocks.findVectorizedClaimMatches,
+  };
+});
+
+function createClaim(id: string): StoredClaimRow {
+  return {
+    id,
+    project_id: "project-1",
+    scope_kind: "project",
+    scope_id: "project-1",
+    category: "domain_fact",
+    type: "decision",
+    subject: id,
+    memory_key: id,
+    value_json: JSON.stringify({ value: id }),
+    canonical_text: `The project has claim ${id}.`,
+    status: "active",
+    provenance: "user_confirmed",
+    confidence: 1,
+    valid_from: null,
+    valid_until: null,
+    superseded_by: null,
+    applicability: "semantic",
+    workspace_id: null,
+    use_count: 0,
+    last_used_at: null,
+    created_at: 1,
+    updated_at: 1,
+  };
+}
+
+describe("loadMemoryContext semantic retrieval", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.findVectorizedClaimMatches.mockResolvedValue([
+      { id: "claim-1", score: 0.91 },
+      { id: "claim-2", score: 0.85 },
+      { id: "claim-3", score: 0.8 },
+    ]);
+    mocks.fetchClaimsByIds.mockResolvedValue(new Map(
+      ["claim-1", "claim-2", "claim-3"].map((id) => [id, createClaim(id)]),
+    ));
+    mocks.fetchContextClaims.mockResolvedValue([]);
+    mocks.fetchEvidenceByClaimIds.mockResolvedValue(new Map());
+  });
+
+  it("does not re-embed D1 candidates when Vectorize returns fewer matches than the limit", async () => {
+    const ai = {
+      run: vi.fn(async () => ({ data: [[1, 0]] })),
+    } as unknown as Ai;
+    const db = {
+      prepare: vi.fn(() => ({
+        bind: vi.fn(() => ({
+          run: vi.fn(async () => ({ meta: { changes: 3 } })),
+        })),
+      })),
+    } as unknown as D1Database;
+    const env = {
+      AI: ai,
+      DB: db,
+      SEGMENTS_INDEX: {},
+      CLAIMS_INDEX: {},
+    } as unknown as Env;
+
+    const result = await loadMemoryContext(
+      env,
+      { projectId: "project-1", namespace: "project:project-1" },
+      {
+        userId: null,
+        sessionId: null,
+        query: "What durable claims does this project have?",
+        types: null,
+        categories: ["domain_fact"],
+        scopeId: null,
+        limit: 20,
+        workspaceId: null,
+        profileOnly: false,
+      },
+    );
+
+    expect(result.claims).toHaveLength(3);
+    expect(ai.run).toHaveBeenCalledOnce();
+    expect(mocks.fetchContextClaims).not.toHaveBeenCalled();
+    expect(mocks.fetchClaimsByIds).toHaveBeenCalled();
+  });
+});
