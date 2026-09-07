@@ -25,18 +25,22 @@ import { ClaimDedupLockBusyError } from "./claim-dedup";
 const MAX_TEXT_LENGTH = 8_000;
 const MAX_SOURCE_APP_LENGTH = 64;
 const MAX_SESSION_ID_LENGTH = 256;
-const MAX_EVIDENCE_SEGMENTS = 24;
-const MAX_EVIDENCE_CHARS = 12_000;
+const MAX_EVIDENCE_SEGMENTS = 64;
+const MAX_EVIDENCE_CHARS = 64_000;
 const MAX_WEB_REFERENCE_EVIDENCE_CHARS = 6_000;
 const MAX_ASSISTANT_EVIDENCE_CHARS = 8_000;
 const MAX_WEB_REFERENCE_SEGMENTS_PER_JOB = 3;
 const MAX_ATTEMPTS = 8;
 const LEASE_DURATION_MS = 240_000;
 const EXTRACTOR_TIMEOUT_MS = 60_000;
+const MAX_EXTRACTOR_OUTPUT_TOKENS = 32_000;
+const MAX_VERIFIER_OUTPUT_TOKENS = 8_000;
+const MAX_RECONCILIATION_OUTPUT_TOKENS = 16_000;
+const MAX_EXTRACTOR_CANDIDATES = 32;
 const PROFILE_EVIDENCE_HASH_CHARS = 40;
 const MAX_ACTIVE_OWNER_CLAIMS = 200;
 const MAX_INACTIVE_OWNER_CLAIMS = 50;
-const DEFAULT_BATCH_MAX_CHARS = 10_000;
+const DEFAULT_BATCH_MAX_CHARS = 64_000;
 const DEFAULT_BATCH_IDLE_MS = 900_000;
 const MAX_FLUSH_BATCHES_PER_GROUP = 4;
 const INBOX_DELETE_CHUNK_SIZE = 50;
@@ -552,13 +556,13 @@ export async function runExtractionTest(
   const input = `Workspace ID: none\n\nExisting claims: []\n\nUser evidence:\n${evidence}`;
   const rawExtractor = await callExtractorLlm(
     env, "You are a profile-memory extractor. Return JSON only.",
-    extractorInstructions, input, 1_200, "extractor_test",
+    extractorInstructions, input, MAX_EXTRACTOR_OUTPUT_TOKENS, "extractor_test",
   );
   const parsed = parseExtractorJson(rawExtractor);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("extractor_response_invalid_json");
   const claims = (parsed as { claims?: unknown }).claims;
   if (!Array.isArray(claims)) throw new Error("extractor_response_missing_claims");
-  const candidates = claims.slice(0, 5)
+  const candidates = claims.slice(0, MAX_EXTRACTOR_CANDIDATES)
     .map((candidate) => normalizedExtractorCandidate(candidate, null))
     .filter((claim): claim is ExtractedClaim => claim !== null);
 
@@ -569,7 +573,7 @@ export async function runExtractionTest(
   const verifierInput = `Candidates:\n${JSON.stringify(candidates)}\n\nUser evidence:\n${evidence}`;
   const rawVerifier = await callExtractorLlm(
     env, "You are a profile-memory verifier. Return JSON only.",
-    verifierInstructions, verifierInput, 800, "verifier_test",
+    verifierInstructions, verifierInput, MAX_VERIFIER_OUTPUT_TOKENS, "verifier_test",
   );
   const verifierParsed = parseExtractorJson(rawVerifier);
   if (!verifierParsed || typeof verifierParsed !== "object" || Array.isArray(verifierParsed)) throw new Error("verifier_response_invalid_json");
@@ -615,12 +619,12 @@ async function callExtractor(
     ? `Current Workspace: ${workspaceName} (Workspace ID: ${workspaceId ?? "none"})`
     : `Workspace ID: ${workspaceId ?? "none"}`;
   const input = `${workspaceHeader}\n\nExisting claims:\n${JSON.stringify(existing)}\n\nUser evidence:\n${evidenceText}`;
-  const content = await callExtractorLlm(env, "You are a profile-memory extractor. Return JSON only.", instructions, input, 1_200, "extractor");
+  const content = await callExtractorLlm(env, "You are a profile-memory extractor. Return JSON only.", instructions, input, MAX_EXTRACTOR_OUTPUT_TOKENS, "extractor");
   const parsed = parseExtractorJson(content);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("extractor_response_invalid_json");
   const claims = (parsed as { claims?: unknown }).claims;
   if (!Array.isArray(claims)) throw new Error("extractor_response_missing_claims");
-  return claims.slice(0, 5)
+  return claims.slice(0, MAX_EXTRACTOR_CANDIDATES)
     .map((candidate) => normalizedExtractorCandidate(candidate, workspaceId))
     .filter((claim): claim is ExtractedClaim => claim !== null);
 }
@@ -634,7 +638,7 @@ async function verifyCandidates(
   const config = await loadPromptConfig(env);
   const instructions = config.verifierInstructions;
   const input = `Candidates:\n${JSON.stringify(candidates)}\n\nUser evidence:\n${evidenceText}`;
-  const content = await callExtractorLlm(env, "You are a profile-memory verifier. Return JSON only.", instructions, input, 800, "verifier");
+  const content = await callExtractorLlm(env, "You are a profile-memory verifier. Return JSON only.", instructions, input, MAX_VERIFIER_OUTPUT_TOKENS, "verifier");
   const parsed = parseExtractorJson(content);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("verifier_response_invalid_json");
   const verdicts = (parsed as { verdicts?: unknown }).verdicts;
@@ -704,7 +708,7 @@ async function callReconciliation(
     "Return exactly one decision for every NEW candidate.",
   ].join(" ");
   const input = `Workspace ID: ${workspaceId ?? "none"}\n\nNew candidates:\n${JSON.stringify(candidates)}\n\nExisting active claims:\n${JSON.stringify(existing)}`;
-  const content = await callExtractorLlm(env, "You are a claim reconciler. Return JSON only.", instructions, input, 1_200, "reconciler");
+  const content = await callExtractorLlm(env, "You are a claim reconciler. Return JSON only.", instructions, input, MAX_RECONCILIATION_OUTPUT_TOKENS, "reconciler");
   const parsed = parseExtractorJson(content);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("reconciler_response_invalid_json");
   const decisions = (parsed as { decisions?: unknown }).decisions;

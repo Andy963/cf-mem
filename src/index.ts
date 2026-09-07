@@ -11,9 +11,9 @@ import { runNudgeExtractionScan } from "./memory/nudge";
 import { runClaimVectorReconciliation } from "./memory/claim-reconciliation";
 
 // Each job runs up to three sequential extractor calls with a 60s timeout each,
-// so three jobs is ~9 minutes worst case — within the waitUntil budget, while
-// lifting throughput from 12 to 36 jobs/hour at the current 5-minute cron.
-const PROFILE_JOBS_PER_TICK = 10;
+// so two jobs is ~6 minutes worst case — within the waitUntil budget while
+// keeping the cron batch bounded at the current 5-minute interval.
+const PROFILE_JOBS_PER_TICK = 2;
 
 async function validateRequestProjectId(request: Request, projectId: string): Promise<void> {
   if (request.method.toUpperCase() === "GET") return;
