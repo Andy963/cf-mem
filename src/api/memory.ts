@@ -6,6 +6,7 @@ import { defaultMemorySchema, MemorySchemaError, type SearchRequestInput } from 
 import { searchMemoryItems } from "../memory/searcher";
 import { forgetScopedMemory } from "../memory/retention";
 import { enqueueEvidenceExtraction, enqueueProfileIngest } from "../memory/profile";
+import { ClaimDedupLockBusyError } from "../memory/claim-dedup";
 import type { ProjectScope } from "../project";
 import { jsonResponse, parseJson, textResponse } from "./http";
 
@@ -162,6 +163,13 @@ export async function handleMemoryRequest(request: Request, env: Env, projectSco
       const claim = await mutateClaim(env, projectScope, mutation);
       return jsonResponse(env, { ok: true, project_id: projectScope.projectId, claim });
     } catch (error) {
+      if (error instanceof ClaimDedupLockBusyError) {
+        return jsonResponse(
+          env,
+          { error: { message: error.message } },
+          { status: 503, headers: { "Retry-After": "1" } },
+        );
+      }
       if (error instanceof ClaimSchemaError || error instanceof MemorySchemaError) {
         return invalidRequestResponse(env, error);
       }
