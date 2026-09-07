@@ -160,7 +160,7 @@ Claims 按四类路由：`rule` 用于全局或工作区行为约束，`tool_ins
 3. 每个页面存成独立的 `kind: "web_reference"` segment，携带 `source_url`、`final_url`、
    `fetched_at`、`fetch_provider` 和 `content_hash`。segment id 由 URL 加内容哈希派生：
    页面变了就变成新 segment，而不是覆写一条已有 claim 引用的证据。
-4. 用户发言和抓到的页面分开预算（12000 / 6000 字符），且只有用户发言计入攒批阈值，
+4. 用户发言和抓到的页面分开预算（64000 / 6000 字符），且只有用户发言计入攒批阈值，
    避免一个链接吃掉整批预算。
 5. 要求每个被接受的候选至少引用一条 `kind: "user"` 的 segment。因此「永远用英文回答」
    这类出现在网页里的指令无法把自己提升成 claim。

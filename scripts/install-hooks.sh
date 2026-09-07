@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Deprecated compatibility installer. New integrations should use runtime
+# middleware or call the cf-mem HTTP API directly.
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOK_TEMPLATE="${SCRIPT_DIR}/cf_mem_hook.py"
 
@@ -16,6 +19,9 @@ OPT_PROJECT_ID=""
 
 usage() {
   cat <<'EOF'
+Deprecated: this installer is retained only for existing client migrations.
+New integrations should call the cf-mem HTTP API or use runtime middleware.
+
 Usage:
   ./scripts/install-hooks.sh --cli <codex|droid|claude|all> [options]
 
@@ -424,3 +430,4 @@ case "$TARGET_CLI" in
 esac
 
 echo "Done! cf-mem hooks successfully installed for $TARGET_CLI."
+echo "Warning: these standalone hooks are deprecated; migrate to runtime middleware or direct HTTP integration." >&2
