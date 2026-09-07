@@ -28,22 +28,24 @@ interface BreakerRow {
   consecutive_failures: number;
   open_until_at: number | null;
   last_error: string | null;
+  updated_at: number | null;
 }
 
 async function readBreakerState(db: D1Database): Promise<BreakerRow> {
   try {
     const row = await db.prepare(
-      "SELECT consecutive_failures, open_until_at, last_error FROM llm_breaker_state WHERE id = 1",
+      "SELECT consecutive_failures, open_until_at, last_error, updated_at FROM llm_breaker_state WHERE id = 1",
     ).first<BreakerRow>();
     return {
       consecutive_failures: row?.consecutive_failures ?? 0,
       open_until_at: row?.open_until_at ?? null,
       last_error: row?.last_error ?? null,
+      updated_at: row?.updated_at ?? null,
     };
   } catch {
     // A missing or temporarily unavailable state table must not block the
     // underlying LLM request. Treat the breaker as closed until D1 recovers.
-    return { consecutive_failures: 0, open_until_at: null, last_error: null };
+    return { consecutive_failures: 0, open_until_at: null, last_error: null, updated_at: null };
   }
 }
 
@@ -57,23 +59,61 @@ export async function getBreakerOpenUntilAt(env: Env): Promise<number | null> {
   }
 }
 
-async function writeBreakerState(
-  db: D1Database,
-  state: { consecutive_failures: number; open_until_at: number | null; last_error: string | null },
-  now: number,
-): Promise<void> {
-  await db.prepare(
-    "UPDATE llm_breaker_state SET consecutive_failures = ?, open_until_at = ?, last_error = ?, updated_at = ? WHERE id = 1",
-  ).bind(state.consecutive_failures, state.open_until_at, state.last_error, now).run();
+async function recordBreakerFailureBestEffort(db: D1Database, failure: string, now: number): Promise<BreakerRow> {
+  try {
+    // The increment must happen in SQLite. Reading the count before the
+    // provider call and writing an absolute value loses concurrent failures.
+    await db.prepare(
+      `UPDATE llm_breaker_state
+       SET consecutive_failures = consecutive_failures + 1,
+           open_until_at = CASE
+             WHEN consecutive_failures + 1 >= ?
+               AND (open_until_at IS NULL OR open_until_at <= ?)
+             THEN ?
+             ELSE open_until_at
+           END,
+           last_error = ?,
+           updated_at = MAX(updated_at + 1, ?)
+       WHERE id = 1`,
+    ).bind(DEFAULT_OPEN_THRESHOLD, now, now + DEFAULT_OPEN_MS, failure, now).run();
+
+    // This is only for the existing operational log. The state transition is
+    // already complete in the atomic UPDATE above, so a stale read here cannot
+    // reintroduce the lost-update race.
+    return await readBreakerState(db);
+  } catch (error) {
+    // Breaker persistence is telemetry and coordination state. It must never
+    // replace a successful provider result or the provider's original error.
+    console.error(`[llm-breaker] failed to persist state: ${error instanceof Error ? error.message : String(error)}`);
+    return { consecutive_failures: 0, open_until_at: null, last_error: null, updated_at: null };
+  }
 }
 
-async function writeBreakerStateBestEffort(
-  db: D1Database,
-  state: { consecutive_failures: number; open_until_at: number | null; last_error: string | null },
-  now: number,
-): Promise<void> {
+async function resetBreakerStateBestEffort(db: D1Database, state: BreakerRow, now: number): Promise<void> {
   try {
-    await writeBreakerState(db, state, now);
+    // A slow success may have started before another request recorded a
+    // failure. Only clear the row if every value, including the monotonic
+    // updated_at version, is still the value observed before the call.
+    await db.prepare(
+      `UPDATE llm_breaker_state
+       SET consecutive_failures = 0,
+           open_until_at = NULL,
+           last_error = NULL,
+           updated_at = MAX(updated_at + 1, ?)
+       WHERE id = 1
+         AND consecutive_failures = ?
+         AND (open_until_at = ? OR (open_until_at IS NULL AND ? IS NULL))
+         AND (last_error = ? OR (last_error IS NULL AND ? IS NULL))
+         AND updated_at = ?`,
+    ).bind(
+      now,
+      state.consecutive_failures,
+      state.open_until_at,
+      state.open_until_at,
+      state.last_error,
+      state.last_error,
+      state.updated_at,
+    ).run();
   } catch (error) {
     // Breaker persistence is telemetry and coordination state. It must never
     // replace a successful provider result or the provider's original error.
@@ -112,25 +152,18 @@ export async function withBreaker<T>(env: Env, call: () => Promise<T>): Promise<
   try {
     const result = await call();
     if (state.consecutive_failures > 0 || state.open_until_at !== null) {
-      await writeBreakerStateBestEffort(env.DB, { consecutive_failures: 0, open_until_at: null, last_error: null }, Date.now());
+      await resetBreakerStateBestEffort(env.DB, state, Date.now());
     }
     return result;
   } catch (error) {
     const failure = classifyBreakerFailure(error);
     if (!failure) throw error;
-    const failures = state.consecutive_failures + 1;
-    const open_until_at = failures >= DEFAULT_OPEN_THRESHOLD ? Date.now() + DEFAULT_OPEN_MS : null;
-    await writeBreakerStateBestEffort(
-      env.DB,
-      {
-        consecutive_failures: failures,
-        open_until_at,
-        last_error: failure,
-      },
-      Date.now(),
-    );
-    if (open_until_at !== null) {
-      console.error(`[llm-breaker] OPENED after ${failures} consecutive failures (cooldown ${DEFAULT_OPEN_MS}ms): ${failure}`);
+    const failureState = await recordBreakerFailureBestEffort(env.DB, failure, Date.now());
+    if (failureState.open_until_at !== null && failureState.open_until_at > Date.now()) {
+      console.error(
+        `[llm-breaker] OPENED after ${failureState.consecutive_failures} consecutive failures `
+        + `(cooldown ${DEFAULT_OPEN_MS}ms): ${failure}`,
+      );
     }
     throw error;
   }
