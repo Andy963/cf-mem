@@ -26,12 +26,19 @@ function claimNamespace(projectId: string): string {
   return `project:${projectId}:claims`;
 }
 
+export async function deleteClaimVector(env: Env, projectId: string, claimId: string): Promise<void> {
+  const index = env.CLAIMS_INDEX;
+  if (!index) return;
+  if (!index.deleteByIds) throw new Error("Claim vector deletion is unavailable");
+  await index.deleteByIds([claimId]);
+}
+
 export async function syncClaimVector(env: Env, claim: StoredClaimRow): Promise<void> {
   const index = env.CLAIMS_INDEX;
   if (!index) return;
   try {
     if (claim.status !== "active") {
-      if (index.deleteByIds) await index.deleteByIds([claim.id]);
+      await deleteClaimVector(env, claim.project_id, claim.id);
       return;
     }
     const [vector] = await embedTexts(env, [claim.canonical_text]);

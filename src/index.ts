@@ -8,6 +8,7 @@ import type { Env } from "./env";
 import { runRetentionSweep } from "./memory/retention";
 import { flushReadyEvidenceGroups, processProfileJobs } from "./memory/profile";
 import { runNudgeExtractionScan } from "./memory/nudge";
+import { runClaimVectorReconciliation } from "./memory/claim-reconciliation";
 
 // Each job runs up to three sequential extractor calls with a 60s timeout each,
 // so three jobs is ~9 minutes worst case — within the waitUntil budget, while
@@ -107,11 +108,15 @@ export default {
         .catch((error) => {
           console.error(`[cron] evidence_flush failed: ${error instanceof Error ? error.message : String(error)}`);
         })
-        .then(() => Promise.allSettled([runRetentionSweep(env), processProfileJobs(env, PROFILE_JOBS_PER_TICK)]))
+        .then(() => Promise.allSettled([
+          runRetentionSweep(env),
+          processProfileJobs(env, PROFILE_JOBS_PER_TICK),
+          runClaimVectorReconciliation(env),
+        ]))
         .then((results) => {
           for (const [index, result] of results.entries()) {
             if (result.status === "rejected") {
-              const task = index === 0 ? "retention_sweep" : "profile_jobs";
+              const task = ["retention_sweep", "profile_jobs", "claim_vector_reconciliation"][index] ?? "scheduled_task";
               console.error(`[cron] ${task} failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
             }
           }
