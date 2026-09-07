@@ -1,6 +1,11 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import { describe, expect, it, vi } from "vitest";
-import { ClaimDedupLockBusyError, withClaimDedupLock } from "../src/memory/claim-dedup";
+import {
+  ClaimDedupLockBusyError,
+  isSemanticScopeSnapshotCurrent,
+  semanticScopeSnapshotsEqual,
+  withClaimDedupLock,
+} from "../src/memory/claim-dedup";
 
 interface RecordedStatement {
   sql: string;
@@ -26,6 +31,22 @@ function createDatabase(changes: number[]): { db: D1Database; statements: Record
     },
   } as unknown as D1Database;
   return { db, statements };
+}
+
+function createScopeDatabase(rows: Array<{ id: string; updated_at: number }>): D1Database {
+  return {
+    prepare() {
+      return {
+        bind() {
+          return {
+            async all() {
+              return { results: rows };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
 }
 
 const claim = {
@@ -79,5 +100,51 @@ describe("withClaimDedupLock", () => {
 
     expect(statements[0]?.values[3]).toBe("domain_fact");
     expect(statements[2]?.values[3]).toBe("rule");
+  });
+
+  it("recognizes an unchanged semantic scope snapshot", async () => {
+    const snapshot = {
+      claims: [
+        { id: "claim-b", updatedAt: 20 },
+        { id: "claim-a", updatedAt: 10 },
+      ],
+    };
+    const current = {
+      claims: [
+        { id: "claim-a", updatedAt: 10 },
+        { id: "claim-b", updatedAt: 20 },
+      ],
+    };
+
+    expect(semanticScopeSnapshotsEqual(snapshot, current)).toBe(true);
+    await expect(isSemanticScopeSnapshotCurrent(
+      createScopeDatabase([
+        { id: "claim-b", updated_at: 20 },
+        { id: "claim-a", updated_at: 10 },
+      ]),
+      "project-1",
+      claim,
+      snapshot,
+      100,
+    )).resolves.toBe(true);
+  });
+
+  it("invalidates a semantic plan when a claim is added or updated", async () => {
+    const snapshot = { claims: [{ id: "claim-a", updatedAt: 10 }] };
+
+    expect(semanticScopeSnapshotsEqual(
+      snapshot,
+      { claims: [{ id: "claim-a", updatedAt: 11 }] },
+    )).toBe(false);
+    await expect(isSemanticScopeSnapshotCurrent(
+      createScopeDatabase([
+        { id: "claim-a", updated_at: 10 },
+        { id: "claim-b", updated_at: 20 },
+      ]),
+      "project-1",
+      claim,
+      snapshot,
+      100,
+    )).resolves.toBe(false);
   });
 });

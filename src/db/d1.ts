@@ -176,6 +176,21 @@ export async function fetchActiveClaimsBySemanticScope(
   return result.results;
 }
 
+export async function fetchActiveClaimScopeFingerprint(
+  db: D1Database,
+  projectId: string,
+  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "category" | "type" | "workspaceId">,
+  now: number,
+): Promise<Array<{ id: string; updated_at: number }>> {
+  const result = await db
+    .prepare(
+      "SELECT id, updated_at FROM memory_claims WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND COALESCE(workspace_id, '') = COALESCE(?, '') AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?)",
+    )
+    .bind(projectId, claim.scopeKind, claim.scopeId, claim.category, claim.type, claim.workspaceId, now, now)
+    .all<{ id: string; updated_at: number }>();
+  return result.results;
+}
+
 function insertClaimStatement(
   db: D1Database,
   projectId: string,

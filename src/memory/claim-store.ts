@@ -29,7 +29,15 @@ import {
   isTrivialPrompt,
 } from "./claims";
 import { cosineSimilarity, findVectorizedClaimMatches, syncClaimVector } from "./claim-index";
-import { readDedupConfig, resolveSemanticDuplicate, withClaimDedupLock } from "./claim-dedup";
+import {
+  ClaimDedupLockBusyError,
+  isSemanticScopeSnapshotCurrent,
+  readDedupConfig,
+  resolveSemanticDuplicate,
+  resolveSemanticDuplicateWithSnapshot,
+  type SemanticResolution,
+  withClaimDedupLock,
+} from "./claim-dedup";
 import { chunkArray } from "../utils";
 
 function newClaimId(): string {
@@ -153,35 +161,66 @@ async function requireClaim(db: D1Database, projectId: string, claimId: string):
   return claim;
 }
 
+interface ClaimCreateResult {
+  claim: StoredClaimRow;
+  supersededClaim: StoredClaimRow | null;
+}
+
+class ClaimDedupPlanStaleError extends Error {
+  constructor() {
+    super("claim_dedup_plan_stale");
+    this.name = "ClaimDedupPlanStaleError";
+  }
+}
+
+const MAX_SEMANTIC_PLAN_ATTEMPTS = 3;
+
 async function createClaim(
   env: Env,
   db: D1Database,
   projectScope: ProjectScope,
   claim: ClaimInput,
   operation: "create" | "supersede",
-): Promise<StoredClaimRow> {
+): Promise<ClaimCreateResult> {
   await verifyEvidence(db, projectScope.projectId, claim.evidenceSegmentIds);
-  const execute = async (): Promise<StoredClaimRow> => {
+  const shouldUseSemanticPlan = operation === "create"
+    && Boolean(env.CLAIMS_INDEX)
+    && claim.provenance !== "model_inferred";
+  const identityBeforePlan = shouldUseSemanticPlan
+    ? await fetchActiveClaimByIdentity(db, projectScope.projectId, claim)
+    : null;
+  let semanticPlan: SemanticResolution | null = shouldUseSemanticPlan && !identityBeforePlan
+    ? await resolveSemanticDuplicateWithSnapshot(
+      env,
+      db,
+      projectScope.projectId,
+      claim,
+      readDedupConfig(env),
+    )
+    : null;
+
+  const execute = async (): Promise<ClaimCreateResult> => {
     const now = Date.now();
     const claimId = newClaimId();
     const current = await fetchActiveClaimByIdentity(db, projectScope.projectId, claim);
     const isSameValue = (stored: StoredClaimRow) =>
       stored.value_json === JSON.stringify(claim.value) && stored.canonical_text === claim.canonicalText;
+    let supersededClaim: StoredClaimRow | null = null;
 
     if (operation === "create") {
       if (current) {
         if (isSameValue(current)) {
           // Inferred claims must never mutate an active claim. Keep the
           // existing active row authoritative until explicit confirmation.
-          if (claim.provenance === "model_inferred") return current;
+          if (claim.provenance === "model_inferred") return { claim: current, supersededClaim: null };
           await reinforceClaim(db, projectScope.projectId, current.id, claim.confidence, now);
           await insertClaimEvidence(db, projectScope.projectId, current.id, claim.evidenceSegmentIds, "supports", now);
-          return await requireClaim(db, projectScope.projectId, current.id);
+          return { claim: await requireClaim(db, projectScope.projectId, current.id), supersededClaim: null };
         }
         if (claim.provenance !== "model_inferred" && (claim.category === "rule" || claim.category === "tool_insight")) {
           await replaceActiveClaim(db, projectScope.projectId, current.id, claimId, claim, now);
-          await syncClaimVector(env, { ...current, status: "superseded" });
-          return await requireClaim(db, projectScope.projectId, claimId);
+          supersededClaim = current;
+          return { claim: await requireClaim(db, projectScope.projectId, claimId), supersededClaim };
         }
         throw new ClaimSchemaError("An active claim already exists for this canonical key; use reinforce, supersede, or retract");
       } else if (claim.provenance === "model_inferred") {
@@ -191,7 +230,16 @@ async function createClaim(
       } else {
         // No identity twin under the canonical key. LLM extractors rephrase the
         // same fact across runs, so check for a semantic twin before inserting.
-        const semantic = await resolveSemanticDuplicate(
+        if (shouldUseSemanticPlan && !semanticPlan) throw new ClaimDedupPlanStaleError();
+        if (semanticPlan && !(await isSemanticScopeSnapshotCurrent(
+          db,
+          projectScope.projectId,
+          claim,
+          semanticPlan.snapshot,
+        ))) {
+          throw new ClaimDedupPlanStaleError();
+        }
+        const semantic = semanticPlan?.action ?? await resolveSemanticDuplicate(
           env,
           db,
           projectScope.projectId,
@@ -201,14 +249,12 @@ async function createClaim(
         if (semantic.kind === "reinforce") {
           await reinforceClaim(db, projectScope.projectId, semantic.match.id, claim.confidence, now);
           await insertClaimEvidence(db, projectScope.projectId, semantic.match.id, claim.evidenceSegmentIds, "supports", now);
-          return await requireClaim(db, projectScope.projectId, semantic.match.id);
+          return { claim: await requireClaim(db, projectScope.projectId, semantic.match.id), supersededClaim: null };
         }
         if (semantic.kind === "replace") {
           await replaceActiveClaim(db, projectScope.projectId, semantic.match.id, claimId, claim, now);
-          // Pass the post-mutation status so syncClaimVector deletes the stale
-          // vector instead of upserting the pre-mutation snapshot.
-          await syncClaimVector(env, { ...semantic.match, status: "superseded" });
-          return await requireClaim(db, projectScope.projectId, claimId);
+          supersededClaim = semantic.match;
+          return { claim: await requireClaim(db, projectScope.projectId, claimId), supersededClaim };
         }
         await insertClaimWithEvidence(db, projectScope.projectId, claimId, claim, "active", now);
       }
@@ -219,21 +265,38 @@ async function createClaim(
       if (isSameValue(current)) {
         await reinforceClaim(db, projectScope.projectId, current.id, claim.confidence, now);
         await insertClaimEvidence(db, projectScope.projectId, current.id, claim.evidenceSegmentIds, "supports", now);
-        return await requireClaim(db, projectScope.projectId, current.id);
+        return { claim: await requireClaim(db, projectScope.projectId, current.id), supersededClaim: null };
       }
       await replaceActiveClaim(db, projectScope.projectId, current.id, claimId, claim, now);
-      await syncClaimVector(env, { ...current, status: "superseded" });
+      supersededClaim = current;
     }
 
-    return await requireClaim(db, projectScope.projectId, claimId);
+    return { claim: await requireClaim(db, projectScope.projectId, claimId), supersededClaim };
   };
 
-  // Vector search is only a narrowing hint, so serialize the read/decide/write
-  // sequence for each claim scope. The lock has a lease for crash recovery.
+  // Semantic work runs before the lease. The lease only protects the final D1
+  // identity check and mutation; a changed scope snapshot forces a fresh plan
+  // after releasing the lease rather than doing embedding or LLM work inside it.
   const shouldLock = Boolean(env.CLAIMS_INDEX) && claim.provenance !== "model_inferred";
-  return shouldLock
-    ? await withClaimDedupLock(db, projectScope.projectId, claim, execute)
-    : await execute();
+  if (!shouldLock) return await execute();
+
+  for (let attempt = 0; attempt < MAX_SEMANTIC_PLAN_ATTEMPTS; attempt += 1) {
+    try {
+      return await withClaimDedupLock(db, projectScope.projectId, claim, execute);
+    } catch (error) {
+      if (!(error instanceof ClaimDedupPlanStaleError)) throw error;
+      if (attempt + 1 >= MAX_SEMANTIC_PLAN_ATTEMPTS) throw new ClaimDedupLockBusyError();
+      semanticPlan = await resolveSemanticDuplicateWithSnapshot(
+        env,
+        db,
+        projectScope.projectId,
+        claim,
+        readDedupConfig(env),
+      );
+    }
+  }
+
+  throw new ClaimDedupLockBusyError();
 }
 
 export async function mutateClaim(
@@ -243,10 +306,13 @@ export async function mutateClaim(
 ): Promise<Record<string, unknown>> {
   const db = env.DB;
   if (request.operation === "create" || request.operation === "supersede") {
-    const claim = await createClaim(env, db, projectScope, request.claim, request.operation);
-    await syncClaimVector(env, claim);
-    const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, [claim.id]);
-    return toClaimResponse(claim, evidence.get(claim.id));
+    const result = await createClaim(env, db, projectScope, request.claim, request.operation);
+    if (result.supersededClaim) {
+      await syncClaimVector(env, { ...result.supersededClaim, status: "superseded" });
+    }
+    await syncClaimVector(env, result.claim);
+    const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, [result.claim.id]);
+    return toClaimResponse(result.claim, evidence.get(result.claim.id));
   }
 
   if (request.operation !== "reinforce" && request.operation !== "retract") {
