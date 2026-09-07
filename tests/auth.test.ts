@@ -71,6 +71,16 @@ describe("resolveProjectScope", () => {
     );
   });
 
+  it("rejects a missing authorization token", () => {
+    expectAuthError(
+      () => resolveProjectScope(
+        new Request("https://example.com/memory/health", { headers: { "X-Project-Id": "new-repository" } }),
+        { MEMORY_API_TOKEN: "shared-token" },
+      ),
+      401,
+    );
+  });
+
   it("rejects an invalid token before parsing malformed legacy configuration", () => {
     expectAuthError(
       () => resolveProjectScope(
