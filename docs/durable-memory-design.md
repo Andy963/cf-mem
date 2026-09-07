@@ -73,9 +73,11 @@ claim 对 claim 的替换用 `memory_claims.superseded_by` 表示。证据关联
    Vectorize 结果先用 metadata 过滤收窄，状态与有效性的最终裁决权始终在 D1。
 8. 处于 Vectorize 最终一致性的可见窗口内时，做 create 决策前会把向量结果中缺失的
    same-scope active claims 从 D1 重新嵌入补齐。
-9. 语义上的「读取 → 裁决 → 写入」序列由短期的 D1 租约锁（lease lock）保护，
-   锁键包含 project、scope、category、type 和 workspace。锁只做一次原子获取；
-   竞争请求快速失败并由调用方重试，不在 D1 上轮询等待。
+9. 语义去重的 embedding、Vectorize 查询和 LLM 裁决在租约外预计算；提交前用 active claim
+   的 `(id, updated_at)` 快照在短期 D1 租约锁（lease lock）内校验。快照变化时释放租约并重新
+   计算，避免把昂贵的外部调用放进锁的临界区。最终 D1 身份检查和写入仍由包含 project、scope、
+   category、type 和 workspace 的锁保护。锁只做一次原子获取；竞争请求快速失败并由调用方重试，
+   不在 D1 上轮询等待。
 
 ## 分类路由与生命周期
 
