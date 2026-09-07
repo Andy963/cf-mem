@@ -26,8 +26,8 @@ const MAX_FAILED_ATTEMPTS = 3;
 // Keep nudge-created jobs within the same evidence limits used by the profile
 // extractor. A cron tick may scan more rows, but one job must never silently
 // lose its tail when boundedEvidenceText applies its character budget.
-const MAX_EVIDENCE_SEGMENTS_PER_JOB = 24;
-const MAX_EVIDENCE_CHARS_PER_JOB = 12_000;
+const MAX_EVIDENCE_SEGMENTS_PER_JOB = 64;
+const MAX_EVIDENCE_CHARS_PER_JOB = 64_000;
 
 export interface NudgeScanResult {
   scanned: number;
