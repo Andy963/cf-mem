@@ -41,6 +41,7 @@ export interface Env {
 
   API_TOKEN?: string;
   MEMORY_API_TOKEN?: string;
+  /** Deprecated migration guard; ignored for shared memory-token requests. */
   ALLOWED_MEMORY_PROJECTS?: string;
   /** Deprecated migration credentials; never use them to derive a scope. */
   PROJECT_TOKENS_JSON?: string;
