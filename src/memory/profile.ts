@@ -21,6 +21,7 @@ import { getBreakerOpenUntilAt, isBreakerOpenError, type BreakerOpenError, withB
 import { markSegmentExtractionFailed } from "./nudge";
 import { normalizeExternalSessionId } from "./session";
 import { chunkArray, sha256Hex, truncateText } from "../utils";
+import { ClaimDedupLockBusyError } from "./claim-dedup";
 
 const MAX_TEXT_LENGTH = 8_000;
 const MAX_SOURCE_APP_LENGTH = 64;
@@ -1210,6 +1211,7 @@ async function applyExtractedClaims(
       applied += 1;
     } catch (error) {
       if (isBreakerOpenError(error)) throw error;
+      if (error instanceof ClaimDedupLockBusyError) throw error;
       const label = `candidate_${index}:${errorLabel(error)}`;
       failures.push(label);
       console.error(`[profile] job=${job.id} failed to apply ${label}`);
@@ -1475,12 +1477,19 @@ export async function processProfileJob(env: Env, id: string): Promise<void> {
       }
       return;
     }
-    console.error(`[profile] job=${job.id} attempt=${job.attempt_count} failed: ${errorLabel(error)}`);
+    const isLockBusy = error instanceof ClaimDedupLockBusyError;
+    if (isLockBusy) {
+      console.warn(`[profile] job=${job.id} postponed: claim dedup lock is busy`);
+    } else {
+      console.error(`[profile] job=${job.id} attempt=${job.attempt_count} failed: ${errorLabel(error)}`);
+    }
     // Nudge-enqueued evidence must not retry forever: bump each segment's
     // failure counter so the scan drops them after MAX_FAILED_ATTEMPTS.
-    const evidenceIds = jobEvidenceIds(job);
-    for (const segmentId of evidenceIds) {
-      await markSegmentExtractionFailed(env, job.project_id, segmentId).catch(() => {});
+    if (!isLockBusy) {
+      const evidenceIds = jobEvidenceIds(job);
+      for (const segmentId of evidenceIds) {
+        await markSegmentExtractionFailed(env, job.project_id, segmentId).catch(() => {});
+      }
     }
     try {
       await failJob(env, job, error);
