@@ -28,7 +28,7 @@ import {
   type ContextRequest,
   isTrivialPrompt,
 } from "./claims";
-import { cosineSimilarity, findVectorizedClaimMatches } from "./claim-index";
+import { findVectorizedClaimMatches } from "./claim-index";
 import {
   ClaimDedupLockBusyError,
   isSemanticScopeSnapshotCurrent,
@@ -385,8 +385,6 @@ function profileMinimumScore(env: Env): number {
   return Number.isFinite(score) && score >= 0 && score <= 1 ? score : 0.55;
 }
 
-const MAX_D1_SEMANTIC_FALLBACK_CLAIMS = 500;
-const SEMANTIC_FALLBACK_BATCH_SIZE = 32;
 const LEGACY_CONTEXT_CATEGORIES: ClaimCategory[] = ["rule", "user_profile", "domain_fact"];
 
 interface SemanticContextMatch {
@@ -426,11 +424,6 @@ function selectRoutedClaims(
   return selected;
 }
 
-/**
- * Vectorize's topK is applied before D1 validates status, expiry, scope, and
- * category. If stale vectors occupy that window, re-embed the authoritative
- * D1 candidates so valid claims can still satisfy the requested limit.
- */
 async function loadSemanticContextClaims(
   env: Env,
   projectScope: ProjectScope,
@@ -473,43 +466,6 @@ async function loadSemanticContextClaims(
     }
 
     if (matchesById.size >= request.limit) break;
-  }
-
-  if (matchesById.size < request.limit) {
-    let d1Candidates: StoredClaimRow[];
-    try {
-      d1Candidates = await fetchContextClaims(env.DB, projectScope.projectId, {
-        userId: request.userId,
-        sessionId: request.sessionId,
-        types: request.types,
-        categories: filter?.category === "domain_fact"
-          ? ["domain_fact"]
-          : request.categories ?? LEGACY_CONTEXT_CATEGORIES,
-        workspaceId: request.workspaceId,
-        limit: MAX_D1_SEMANTIC_FALLBACK_CLAIMS,
-      });
-    } catch {
-      d1Candidates = [];
-    }
-    const pending = d1Candidates.filter((claim) => !matchesById.has(claim.id));
-    for (let index = 0; index < pending.length; index += SEMANTIC_FALLBACK_BATCH_SIZE) {
-      const batch = pending.slice(index, index + SEMANTIC_FALLBACK_BATCH_SIZE);
-      let vectors: number[][];
-      try {
-        vectors = await embedTexts(env, batch.map((claim) => claim.canonical_text));
-      } catch {
-        break;
-      }
-      if (vectors.length !== batch.length) break;
-      for (const [batchIndex, vector] of vectors.entries()) {
-        const score = cosineSimilarity(queryVector, vector);
-        const claim = batch[batchIndex];
-        if (score === null || !accepts(claim, score)) continue;
-        const previous = matchesById.get(claim.id);
-        if (!previous || score > previous.score) matchesById.set(claim.id, { claim, score });
-      }
-      if (matchesById.size >= request.limit) break;
-    }
   }
 
   return [...matchesById.values()].sort((left, right) => right.score - left.score);
