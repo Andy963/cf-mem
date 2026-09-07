@@ -31,9 +31,9 @@ X-Project-Id: <project-id>
 ```
 
 `MEMORY_API_TOKEN` 未设置时，当前版本暂时回退到 `API_TOKEN`，以保证迁移期间不中断；新部署
-应尽快设置前者。`ALLOWED_MEMORY_PROJECTS`（逗号分隔）建议设为已存在的项目，例如
-`personal,whisper,ads,cf-mem,study_copilot`，未知项目会返回 `403`。不要把 token 写进
-`wrangler.toml` 或提交到 Git。
+应尽快设置前者。共享 token 可以路由到任何符合 `normalizeProjectId` 约束的项目 ID，不需要为
+新仓库修改配置或重新部署。旧版 `ALLOWED_MEMORY_PROJECTS` 已弃用；若迁移期间仍保留，它只
+限制 legacy project credential，不限制共享 token。不要把 token 写进 `wrangler.toml` 或提交到 Git。
 
 调用方项目 ID 的来源必须稳定且显式：新的 runtime middleware 或直接 HTTP 客户端必须为每个
 `/memory/*` 请求发送 `X-Project-Id`，不要依赖凭据或服务端默认值推断项目。Whisper 的 recall 使用
@@ -106,7 +106,7 @@ npx wrangler secret put PROJECT_TOKENS_JSON
 | --- | --- | --- |
 | `API_TOKEN` | 使用 `/`、`/health`、`/embed`、`/v1/embeddings` 或 `/web/*` | Embedding 和网页接口共用的鉴权 token |
 | `MEMORY_API_TOKEN` | 使用项目级 `/memory/*` | 所有项目共用的全局鉴权 token；未设置时回退 `API_TOKEN` |
-| `ALLOWED_MEMORY_PROJECTS` | 限制项目访问范围 | 逗号分隔的项目 ID；留空表示允许所有合法项目 ID |
+| `ALLOWED_MEMORY_PROJECTS` | 旧凭据迁移期的限制 | 已弃用；仅限制 legacy project credential，共享 token 忽略该变量 |
 | `PROJECT_TOKENS_JSON` | 迁移旧客户端 | 旧版凭据校验，仅作兼容兜底；不参与新路由 |
 | `PERSONAL_MEMORY_TOKEN` | 迁移旧客户端 | 旧版个人凭据，仅作兼容兜底；不参与新路由 |
 | `EXTRACTOR_LLM_API_KEY` | 使用个人记忆自动提炼 | 抽取、验证、对齐请求使用的模型 key |
