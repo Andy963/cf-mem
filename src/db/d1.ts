@@ -474,8 +474,11 @@ export async function fetchToolInsightClaims(
  * Owner claims feed the extractor's dedupe context and the reconciler. Active
  * rows are fetched separately so a long tail of superseded history can never
  * crowd them out of a single LIMIT — that silently blinded the reconciler and
- * caused duplicate claims. The non-active tail is still needed because a stale
- * supersede target is resolved through its superseded_by pointer.
+ * caused duplicate claims. Project facts and decisions are included alongside
+ * project rules because they are shared knowledge, while user profile and
+ * preference claims remain restricted to the extraction owner. The non-active
+ * tail is still needed because a stale supersede target is resolved through its
+ * superseded_by pointer.
  */
 export async function fetchOwnerClaims(
   db: D1Database,
@@ -490,8 +493,8 @@ export async function fetchOwnerClaims(
     : "COALESCE(workspace_id, '') = ''";
   const workspaceBindings = workspaceId ? [workspaceId] : [];
   const ownerScope = `(scope_kind = 'user' AND scope_id = ? AND category != 'tool_insight' AND ${workspaceCondition})`;
-  const projectRuleScope = `(scope_kind = 'project' AND scope_id = ? AND category = 'rule' AND ${workspaceCondition})`;
-  const visibleScope = `(${ownerScope} OR ${projectRuleScope})`;
+  const projectKnowledgeScope = `(scope_kind = 'project' AND scope_id = ? AND (category IN ('rule', 'domain_fact') OR type = 'decision') AND ${workspaceCondition})`;
+  const visibleScope = `(${ownerScope} OR ${projectKnowledgeScope})`;
   const active = await db
     .prepare(
       `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND ${visibleScope} AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) ORDER BY updated_at DESC LIMIT ?`,
