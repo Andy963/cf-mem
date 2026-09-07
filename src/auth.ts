@@ -116,15 +116,10 @@ export function resolveProjectScope(
     throw new RequestAuthError(400, "X-Project-Id is invalid");
   }
 
-  const allowedProjects = parseAllowedProjects(env.ALLOWED_MEMORY_PROJECTS);
-  const ensureProjectAllowed = (id: string): void => {
-    if (allowedProjects && !allowedProjects.has(id)) {
-      throw new RequestAuthError(403, "Project is not allowed for this token");
-    }
-  };
-
   if (sharedToken && constantTimeEqual(requestToken, sharedToken)) {
-    ensureProjectAllowed(projectId);
+    // The shared memory credential is intentionally project-agnostic. The
+    // explicit header and normalizeProjectId above define the routing boundary;
+    // the deprecated allowlist must not block dynamic workspace onboarding.
     return createProjectScope(projectId);
   }
 
@@ -149,7 +144,15 @@ export function resolveProjectScope(
     throw new RequestAuthError(403, "Legacy token is bound to a different project; rotate it to the shared memory token");
   }
 
-  ensureProjectAllowed(projectId);
+  // Keep the optional allowlist only as a migration guard for credentials that
+  // are already bound to one project. It is intentionally not consulted for
+  // the shared token path above. Parse it after authentication so malformed
+  // deprecated configuration cannot turn an invalid token into a 500 error.
+  const allowedProjects = parseAllowedProjects(env.ALLOWED_MEMORY_PROJECTS);
+  if (allowedProjects && !allowedProjects.has(projectId)) {
+    throw new RequestAuthError(403, "Project is not allowed for this token");
+  }
+
   console.warn(`[auth] legacy project credential used for explicit project ${projectId}`);
 
   return createProjectScope(projectId);
