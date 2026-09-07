@@ -43,7 +43,12 @@ function parseClaimListOptions(url: URL): {
   };
 }
 
-export async function handleMemoryRequest(request: Request, env: Env, projectScope: ProjectScope): Promise<Response> {
+export async function handleMemoryRequest(
+  request: Request,
+  env: Env,
+  projectScope: ProjectScope,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const url = new URL(request.url);
   const method = request.method.toUpperCase();
 
@@ -107,7 +112,7 @@ export async function handleMemoryRequest(request: Request, env: Env, projectSco
         limit: url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined,
         profile_only: url.searchParams.get("profile_only") === "true",
       });
-      const result = await loadMemoryContext(env, projectScope, context);
+      const result = await loadMemoryContext(env, projectScope, context, ctx);
       return jsonResponse(env, { ok: true, ...result });
     } catch (error) {
       if (error instanceof ClaimSchemaError || error instanceof MemorySchemaError) {
@@ -204,7 +209,7 @@ export async function handleMemoryRequest(request: Request, env: Env, projectSco
     try {
       body = await parseJson(request);
       const context = normalizeContextRequest(body);
-      const result = await loadMemoryContext(env, projectScope, context);
+      const result = await loadMemoryContext(env, projectScope, context, ctx);
       return jsonResponse(env, { ok: true, ...result });
     } catch (error) {
       if (error instanceof ClaimSchemaError || error instanceof MemorySchemaError) {
