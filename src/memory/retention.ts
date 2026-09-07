@@ -226,16 +226,20 @@ async function completeDeletionJobs(env: Env, jobs: DeletionJob[]): Promise<void
     for (const job of jobs) await completeSegmentDeletion(env, job);
     return;
   } else {
-    if (env.CLAIMS_INDEX?.deleteByIds) {
+    if (env.CLAIMS_INDEX) {
+      if (!env.CLAIMS_INDEX.deleteByIds) throw new Error("Claim vector deletion is unavailable");
       await env.CLAIMS_INDEX.deleteByIds(jobs.map((job) => job.resource_id));
     }
   }
 
   const statements: D1PreparedStatement[] = [];
   for (const job of jobs) {
+    // Keep the job created by the claim DELETE trigger. A reconciliation that
+    // is already in flight may finish after this retention deletion and write
+    // the vector back, so the follow-up delete must remain durable.
     statements.push(
       env.DB.prepare("DELETE FROM memory_evidence WHERE project_id = ? AND claim_id = ?").bind(projectId, job.resource_id),
-      env.DB.prepare("DELETE FROM memory_claims WHERE project_id = ? AND id = ?").bind(projectId, job.resource_id),
+      env.DB.prepare("DELETE FROM memory_claims WHERE project_id = ? AND id = ?").bind(projectId, job.resource_id)
     );
     statements.push(env.DB.prepare("DELETE FROM memory_deletion_jobs WHERE id = ?").bind(job.id));
   }

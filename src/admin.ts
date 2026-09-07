@@ -1,7 +1,6 @@
 import type { Env } from "./env";
 import type { StoredClaimRow } from "./db/d1";
 import { jsonResponse, parseJson, textResponse } from "./api/http";
-import { syncClaimVector } from "./memory/claim-index";
 import { CLAIM_CATEGORIES, type ClaimCategory } from "./memory/claims";
 import {
   DEFAULT_EXTRACTOR_INSTRUCTIONS,
@@ -153,17 +152,6 @@ async function appendClaimAudit(
   ).run();
 }
 
-async function syncAdminClaimVector(env: Env, claim: StoredClaimRow): Promise<void> {
-  try {
-    await syncClaimVector(env, claim);
-  } catch (error) {
-    // The D1 mutation and audit log are authoritative. Claim searches validate
-    // status in D1 after Vectorize retrieval, so an unavailable vector binding
-    // must not turn a completed admin operation into a misleading failure.
-    console.error(`[admin] vector sync deferred for ${claim.id}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
 async function requireAdminClaim(env: Env, claimId: string): Promise<StoredClaimRow> {
   const claim = await env.DB.prepare(
     `SELECT id, project_id, scope_kind, scope_id, category, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, use_count, last_used_at, created_at, updated_at
@@ -197,7 +185,6 @@ async function updateAdminClaim(env: Env, request: Request, claimId: string, bod
     .bind(canonicalText.trim(), valueJson, now, claim.id, claim.project_id).run();
   const updated = await requireAdminClaim(env, claimId);
   await appendClaimAudit(env, updated, request, "edit", reason, before, claimAuditSnapshot(updated));
-  await syncAdminClaimVector(env, updated);
 }
 
 async function retractAdminClaim(env: Env, request: Request, claimId: string, body: unknown): Promise<void> {
@@ -211,7 +198,6 @@ async function retractAdminClaim(env: Env, request: Request, claimId: string, bo
     .bind(now, now, claim.id, claim.project_id).run();
   const updated = await requireAdminClaim(env, claimId);
   await appendClaimAudit(env, updated, request, "retract", reason, before, claimAuditSnapshot(updated));
-  await syncAdminClaimVector(env, updated);
 }
 
 async function deleteAdminClaim(env: Env, request: Request, claimId: string, _body: unknown): Promise<void> {
@@ -220,13 +206,6 @@ async function deleteAdminClaim(env: Env, request: Request, claimId: string, _bo
   await env.DB.prepare("DELETE FROM memory_evidence WHERE project_id = ? AND claim_id = ?").bind(claim.project_id, claim.id).run();
   await env.DB.prepare("DELETE FROM memory_claim_audit_log WHERE project_id = ? AND claim_id = ?").bind(claim.project_id, claim.id).run();
   await env.DB.prepare("DELETE FROM memory_claims WHERE project_id = ? AND id = ?").bind(claim.project_id, claim.id).run();
-  if (env.CLAIMS_INDEX?.deleteByIds) {
-    try {
-      await env.CLAIMS_INDEX.deleteByIds([claim.id]);
-    } catch (e) {
-      console.error(`[admin] failed to delete vector for claim ${claim.id}: ${e}`);
-    }
-  }
 }
 
 async function mutateAdminTag(env: Env, request: Request, claimId: string, tag: string, add: boolean, body: unknown): Promise<void> {
