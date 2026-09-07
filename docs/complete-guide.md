@@ -228,13 +228,13 @@ src/
 
 ## Retention 与删除
 
-Worker 每五分钟运行一次 Cron sweep。它会删除过期、且不再支撑 active claim 的 raw
+Worker 每十五分钟运行一次 Cron sweep。它会删除过期、且不再支撑 active claim 的 raw
 segments，并同步删除 `cf-vector` 中的同 ID vector。同一次 sweep 也会检查每个 project 的
 logical-byte 上限，超限时从最旧的可删除 segment 开始清理到目标水位。
 
 配额检查不再挂在 `/memory/index` 的写路径上：它需要扫描该 project 的全部活跃 segment
 （`SUM(LENGTH(...))` 加上逐行的 evidence join），放在写路径会随数据量线性拖慢写入。代价是
-配额执行最多滞后一个 Cron 周期（5 分钟）。
+配额执行最多滞后一个 Cron 周期（15 分钟）。
 
 删除通过 D1 `memory_deletion_jobs` outbox 执行：先将 segment 标记为不可检索，再删除
 Vectorize vector，最后删除 D1 row；待删除 claim 会立即 retract，避免其在重试期间继续注入上下文。
@@ -409,7 +409,7 @@ Tuning knobs (all optional vars):
 - `PROFILE_BATCH_MAX_SEGMENTS`（默认 `64`，同时也是硬上限）
 - `PROFILE_BATCH_IDLE_MS`（默认 `900000`，即 15 分钟）
 
-时效上界为一个 Cron 周期（5 分钟）加上尾批的空闲等待。需要在明确的会话结束点立即抽取时，改用
+时效上界为一个 Cron 周期（15 分钟）加上尾批的空闲等待。需要在明确的会话结束点立即抽取时，改用
 `POST /memory/extraction/ingest` 显式控批。
 
 `POST /memory/extraction/ingest` lets a project client report already indexed evidence to the same

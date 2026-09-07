@@ -213,7 +213,7 @@ ADMIN_ALLOWED_EMAIL = "admin@example.com"
 
 ## 原始记忆保留与清理
 
-Worker 每五分钟执行一次清理任务：
+Worker 每十五分钟执行一次清理任务：
 
 - 删除过期且不再被 active claim 引用的原始 segment；
 - 删除对应的 `cf-vector` 向量；
