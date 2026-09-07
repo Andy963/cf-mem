@@ -3,7 +3,8 @@ import type { StoredMemoryRow } from "./schema";
 import type { Env } from "../env";
 import type { ProjectScope } from "../project";
 import { chunkArray } from "../utils";
-import { createExtractionJob, isWebReferenceRow } from "./profile";
+import { isWebReferenceRow } from "./profile/evidence";
+import { createExtractionJob } from "./profile/queue";
 import { normalizeExternalSessionId } from "./session";
 
 // Nudge sweep: segments written via POST /memory/index never enter the
