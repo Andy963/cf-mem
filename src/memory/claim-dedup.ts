@@ -25,8 +25,6 @@ const DEFAULT_TOP_K = 12;
 
 const DEDUP_LLM_TIMEOUT_MS = 15_000;
 const DEDUP_LOCK_TTL_MS = 120_000;
-const DEDUP_LOCK_WAIT_MS = 30_000;
-const DEDUP_LOCK_POLL_MS = 100;
 const DEDUP_EMBEDDING_BATCH_SIZE = 32;
 
 type ExtractorProtocol = "chat_completions" | "responses";
@@ -47,6 +45,13 @@ export interface DedupMeta {
 }
 
 export type Verdict = "same" | "update" | "conflict";
+
+export class ClaimDedupLockBusyError extends Error {
+  constructor() {
+    super("claim_dedup_lock_busy");
+    this.name = "ClaimDedupLockBusyError";
+  }
+}
 
 export type SemanticAction =
   | { kind: "insert"; meta: DedupMeta }
@@ -376,55 +381,50 @@ export async function resolveSemanticDuplicate(
   );
 }
 
-function dedupLockKey(claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "type" | "workspaceId">): string[] {
-  return [claim.scopeKind, claim.scopeId, claim.type, claim.workspaceId ?? ""];
+function dedupLockKey(
+  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "category" | "type" | "workspaceId">,
+): string[] {
+  return [claim.scopeKind, claim.scopeId, claim.category, claim.type, claim.workspaceId ?? ""];
 }
 
 async function tryAcquireDedupLock(
   db: D1Database,
   projectId: string,
-  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "type" | "workspaceId">,
+  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "category" | "type" | "workspaceId">,
   token: string,
   now: number,
 ): Promise<boolean> {
-  const [scopeKind, scopeId, type, workspaceId] = dedupLockKey(claim);
+  const [scopeKind, scopeId, category, type, workspaceId] = dedupLockKey(claim);
   const inserted = await db.prepare(
-    "INSERT OR IGNORE INTO memory_claim_dedup_locks (project_id, scope_kind, scope_id, type, workspace_id, lock_token, lock_until) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).bind(projectId, scopeKind, scopeId, type, workspaceId, token, now + DEDUP_LOCK_TTL_MS).run();
+    "INSERT OR IGNORE INTO memory_claim_dedup_locks (project_id, scope_kind, scope_id, category, type, workspace_id, lock_token, lock_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).bind(projectId, scopeKind, scopeId, category, type, workspaceId, token, now + DEDUP_LOCK_TTL_MS).run();
   if (inserted.meta.changes > 0) return true;
 
   const renewed = await db.prepare(
-    "UPDATE memory_claim_dedup_locks SET lock_token = ?, lock_until = ? WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND type = ? AND workspace_id = ? AND lock_until <= ?",
-  ).bind(token, now + DEDUP_LOCK_TTL_MS, projectId, scopeKind, scopeId, type, workspaceId, now).run();
+    "UPDATE memory_claim_dedup_locks SET lock_token = ?, lock_until = ? WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND workspace_id = ? AND lock_until <= ?",
+  ).bind(token, now + DEDUP_LOCK_TTL_MS, projectId, scopeKind, scopeId, category, type, workspaceId, now).run();
   return renewed.meta.changes > 0;
 }
 
 export async function withClaimDedupLock<T>(
   db: D1Database,
   projectId: string,
-  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "type" | "workspaceId">,
+  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "category" | "type" | "workspaceId">,
   callback: () => Promise<T>,
 ): Promise<T> {
   const token = crypto.randomUUID();
-  const deadline = Date.now() + DEDUP_LOCK_WAIT_MS;
-  let acquired = false;
-  while (Date.now() <= deadline) {
-    if (await tryAcquireDedupLock(db, projectId, claim, token, Date.now())) {
-      acquired = true;
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, DEDUP_LOCK_POLL_MS));
+  if (!(await tryAcquireDedupLock(db, projectId, claim, token, Date.now()))) {
+    throw new ClaimDedupLockBusyError();
   }
-  if (!acquired) throw new Error("claim_dedup_lock_timeout");
 
-  const [scopeKind, scopeId, type, workspaceId] = dedupLockKey(claim);
+  const [scopeKind, scopeId, category, type, workspaceId] = dedupLockKey(claim);
   try {
     return await callback();
   } finally {
     try {
       await db.prepare(
-        "DELETE FROM memory_claim_dedup_locks WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND type = ? AND workspace_id = ? AND lock_token = ?",
-      ).bind(projectId, scopeKind, scopeId, type, workspaceId, token).run();
+        "DELETE FROM memory_claim_dedup_locks WHERE project_id = ? AND scope_kind = ? AND scope_id = ? AND category = ? AND type = ? AND workspace_id = ? AND lock_token = ?",
+      ).bind(projectId, scopeKind, scopeId, category, type, workspaceId, token).run();
     } catch (error) {
       console.error(`[claims] failed to release semantic dedup lock: ${error instanceof Error ? error.message : String(error)}`);
     }

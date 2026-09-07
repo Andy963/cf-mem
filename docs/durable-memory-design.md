@@ -74,7 +74,8 @@ claim 对 claim 的替换用 `memory_claims.superseded_by` 表示。证据关联
 8. 处于 Vectorize 最终一致性的可见窗口内时，做 create 决策前会把向量结果中缺失的
    same-scope active claims 从 D1 重新嵌入补齐。
 9. 语义上的「读取 → 裁决 → 写入」序列由短期的 D1 租约锁（lease lock）保护，
-   防止并发请求插入重复的语义 claim。
+   锁键包含 project、scope、category、type 和 workspace。锁只做一次原子获取；
+   竞争请求快速失败并由调用方重试，不在 D1 上轮询等待。
 
 ## 分类路由与生命周期
 
