@@ -8,7 +8,7 @@
    - 琐碎的事实与全局硬约束混杂，占用大量固定 System Prompt 预算。
 2. **作用域泛化导致的跨项目污染（Scope Bleeding）**：
    - 将特定项目/工具的局部经验（例如“夸克网盘转存到‘来自：分享’”）当成全局规则广播到所有项目（如开发 `cf-mem` 或 `ADS` 时误注入网盘规则），造成模型幻觉与上下文混乱。
-   - **根因分析**：上游 Hook 仅机械计算 `cwd` 的匿名哈希且子目录未向根回溯，导致后端抽取器（Extractor LLM）无法感知当前人类可读的项目名（如 `whisper`），盲目将项目特化经验提升为全局偏好。
+   - **根因分析**：旧版客户端 Hook 仅机械计算 `cwd` 的匿名哈希且子目录未向根回溯，导致后端抽取器（Extractor LLM）无法感知当前人类可读的项目名（如 `whisper`），盲目将项目特化经验提升为全局偏好。
 3. **规则冲突与精神分裂（Rule Clashes）**：
    - 当历史偏好或旧工具路径（如已废弃的参数或旧目录）被向量检索召回时，与当前最新规范冲突，导致模型无所适从。
 4. **只增不减无淘汰（Append-Only Decay Deficit）**：
@@ -192,16 +192,27 @@ Content-Type: application/json
 
 ## 6. 客户端消费契约与分工（Client Routing）
 
-### 6.1 助手 Hooks (Codex / Claude / Droid)
-- **`SessionStart` (hook-context)**：
-  - 启动与发生 `compact` 时，调用 `GET /memory/context?categories=rule,user_profile&workspace_id=...`；
-  - 构造 `<system-reminder>` 注入顶部，重置计数器（`turn_count = 0, accum_tokens = 0`）。
-- **`UserPromptSubmit` (hook-capture)**：
-  - 异步将用户 Prompt 投递至 `POST /memory/profile/ingest` 缓冲池；
-  - 维护本地滑窗计数（`turn_count += 1`，累加 Token）；
-  - 命中 `turn_count >= 32` OR `accum_tokens >= 256k` 时，附加 `<system-reminder>` 刷新规则；只有 ingest 与 context 请求都成功才归零，否则保留 `refresh_pending` 并在后续 Prompt 重试。
+### 6.1 Runtime middleware / direct HTTP clients (recommended)
+- **Session start and context refresh**：
+  - Call `GET /memory/context?categories=rule,user_profile&workspace_id=...`;
+  - Inject the returned claims into the runtime context and reset the refresh counters
+    (`turn_count = 0, accum_tokens = 0`).
+- **User prompt and final assistant reply**：
+  - Asynchronously send each evidence item to `POST /memory/profile/ingest`;
+  - Maintain the local refresh window (`turn_count += 1` and accumulated tokens);
+  - When `turn_count >= 32` or `accum_tokens >= 256k`, refresh the context. Reset the counters only
+    after both ingest and context requests succeed; otherwise retain `refresh_pending` and retry.
+- Every request must carry an explicit `X-Project-Id`. The client resolves its own workspace metadata;
+  the Worker owns extraction, verification, reconciliation, and claim writes.
 
-### 6.2 Whisper Bot 运行时
+### 6.2 Legacy hook adapter (migration only)
+`scripts/install-hooks.sh` and `scripts/cf_mem_hook.py` remain available for existing Codex, Claude,
+and Droid installations. They map `SessionStart`, `UserPromptSubmit`, and `Stop` to the same HTTP
+endpoints, redact credential-shaped strings, and fail open when the hook service is unavailable.
+These scripts are compatibility adapters, not the primary client contract; new integrations must use
+runtime middleware or direct HTTP calls.
+
+### 6.3 Whisper Bot 运行时
 - **日常对话**：不加载全部工具知识；
 - **激活 Skill 时**：根据当前 Skill 名称（如 `alipan-save`），按需向 `cf-mem` 查询 `tool_insight` 并挂载到当前执行步骤中；
 - **Handoff / 锚点重建**：在重建 `task_anchor` 时精准挂载当前活跃规则。
@@ -210,8 +221,10 @@ Content-Type: application/json
 
 ## 7. 工作区与项目语义解析协议（Workspace & Project Resolution）
 
-### 7.1 Hook 端的仓库根目录与项目名解析
-Hook 严禁直接使用 `os.getcwd()` 独立哈希（避免在 `whisper/tests/` 子目录下执行时哈希割裂）。必须通过向上回溯确定真实的 Git 根目录或项目主文件：
+### 7.1 兼容 Hook 端的仓库根目录与项目名解析
+以下 resolver 仅描述 legacy hook adapter 的兼容实现。新的 runtime middleware 或直接 HTTP 客户端应从
+自身运行时上下文解析 workspace，并在每个请求中显式发送 `X-Project-Id`；服务端绝不从 token 推断项目。
+兼容 Hook 严禁直接使用 `os.getcwd()` 独立哈希（避免在 `whisper/tests/` 子目录下执行时哈希割裂）。必须通过向上回溯确定真实的 Git 根目录或项目主文件：
 
 ```python
 def _resolve_workspace_info() -> tuple[str, str] | None:

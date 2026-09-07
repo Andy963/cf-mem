@@ -35,14 +35,60 @@ X-Project-Id: <project-id>
 `personal,whisper,ads,cf-mem,study_copilot`，未知项目会返回 `403`。不要把 token 写进
 `wrangler.toml` 或提交到 Git。
 
-调用方项目 ID 的来源必须稳定且显式：共享 profile hook 默认发送 `personal`，也可以在
-`~/.config/cf-mem/config.json` 中填写固定的 `project_id`（只有明确需要项目专属 profile
-时才覆盖它）；Whisper 的 recall 使用 `RECALL_PROJECT_ID`，durable memory 使用
+调用方项目 ID 的来源必须稳定且显式：新的 runtime middleware 或直接 HTTP 客户端必须为每个
+`/memory/*` 请求发送 `X-Project-Id`，不要依赖凭据或服务端默认值推断项目。Whisper 的 recall 使用
+`RECALL_PROJECT_ID`，durable memory 使用
 `WHISPER_DURABLE_MEMORY_PROJECT_ID`（未设置时回退 `RECALL_PROJECT_ID`）。不要让服务端
 根据 token 猜测项目。
 
-Whisper 的 profile connector 也可以用 `WHISPER_PROFILE_MEMORY_PROJECT_ID` 覆盖默认的
-`personal`，但这会把跨工具共享画像切换到另一个项目，只有在明确需要时才设置。
+旧版 Whisper profile connector 在迁移期间仍可用 `WHISPER_PROFILE_MEMORY_PROJECT_ID` 覆盖历史的
+`personal` 默认值；新的 runtime middleware 不读取这个变量，而是为每个请求显式发送项目头。
+
+现有的 `scripts/install-hooks.sh` 和 `scripts/cf_mem_hook.py` 仅作为旧客户端迁移期间的兼容适配器保留，
+不再是新集成的推荐路径。继续使用它们时，应在配置中填写明确的 `project_id`，并计划迁移到 runtime
+middleware 或下方的直接 HTTP 调用。
+
+## 客户端集成
+
+新的客户端应在自己的 runtime middleware 中调用 HTTP API，或直接实现同样的请求。会话开始或上下文
+刷新时读取 `GET /memory/context`；用户消息和助手最终回复分别作为证据发送到
+`POST /memory/profile/ingest`。客户端只负责上报证据和消费上下文，不应自行调用 LLM 或直接写入
+自动提炼产生的 Claims。
+
+每个请求都必须使用共享 token 和明确的项目头：
+
+```text
+Authorization: Bearer <shared-token>
+X-Project-Id: <project-id>
+```
+
+最小的 runtime middleware 调用示例：
+
+```bash
+CF_MEM_URL="https://mem.example.com/memory"
+CF_MEM_PROJECT_ID="cf-mem"
+CF_MEM_OWNER_ID="owner-123"
+CF_MEM_WORKSPACE_ID="ws_cf-mem_0123456789abcdef"
+
+curl -sS \
+  -H "Authorization: Bearer $MEMORY_API_TOKEN" \
+  -H "X-Project-Id: $CF_MEM_PROJECT_ID" \
+  "$CF_MEM_URL/context?user_id=$CF_MEM_OWNER_ID&categories=rule,user_profile&workspace_id=$CF_MEM_WORKSPACE_ID&limit=15"
+
+curl -sS \
+  -H "Authorization: Bearer $MEMORY_API_TOKEN" \
+  -H "X-Project-Id: $CF_MEM_PROJECT_ID" \
+  -H "Content-Type: application/json" \
+  "$CF_MEM_URL/profile/ingest" \
+  -d '{
+    "text": "I prefer concise replies.",
+    "role": "user",
+    "source_app": "codex",
+    "external_session_id": "session-123",
+    "workspace_id": "ws_cf-mem_0123456789abcdef",
+    "workspace_name": "cf-mem"
+  }'
+```
 
 旧客户端迁移期间可以暂时保留旧 secret：
 
@@ -112,8 +158,8 @@ OpenAI 兼容的请求格式，因此保持 `chat_completions` 即可，不需�
 | 名称 | 默认值 | 作用 |
 | --- | --- | --- |
 | `PROFILE_CONTEXT_MIN_SCORE` | `0.55` | profile claim 语义召回最低分 |
-| `PROFILE_BATCH_MAX_CHARS` | `10000` | 一批用户证据的字符上限，最多钳制到 `12000` |
-| `PROFILE_BATCH_MAX_SEGMENTS` | `24` | 一批证据的条数上限 |
+| `PROFILE_BATCH_MAX_CHARS` | `64000` | 一批用户证据的字符上限，最多钳制到 `64000` |
+| `PROFILE_BATCH_MAX_SEGMENTS` | `64` | 一批证据的条数上限 |
 | `PROFILE_BATCH_IDLE_MS` | `900000` | 尾批等待时间，单位为毫秒 |
 
 ## Claims 语义去重

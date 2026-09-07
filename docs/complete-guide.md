@@ -250,9 +250,9 @@ Vectorize 暂时失败会保留 job 并由下一次 Cron sweep 自动重试。
 `POST /memory/profile/ingest` accepts bounded user evidence from the project selected by
 `X-Project-Id`:
 
-The shared profile connector sends `X-Project-Id: personal` by default so user preferences
-remain cross-tool. A caller that intentionally needs project-local profile evidence can set an
-explicit `project_id` in its connector configuration.
+New clients must select the project in their runtime configuration and send it explicitly as
+`X-Project-Id` on every request. The server does not infer a project from the token, and a client
+must not rely on the legacy `personal` default.
 
 ```json
 {
@@ -281,16 +281,26 @@ its own character budget, and governed by a weaker evidentiary bar:
 A batch that contains no user evidence is not extracted at all, so an assistant monologue cannot
 produce claims on its own.
 
-`scripts/install-hooks.sh` wires both directions for codex, droid, and claude:
-`UserPromptSubmit` runs `cf_mem_hook.py hook-capture` for the prompt, and `Stop` runs
-`cf_mem_hook.py hook-assistant` for the final reply. The assistant hook reads the reply from the
-event payload, falling back to the last assistant turn in `transcript_path`. Before upload it
-scrubs credential-shaped strings (`sk-…`, `ghp_…`, `AKIA…`, JWTs, and `token=`/`api_key=`
-assignments) and skips replies under 80 characters, which are acknowledgements rather than facts.
+The standalone `scripts/install-hooks.sh` and `scripts/cf_mem_hook.py` are deprecated compatibility
+adapters for existing Codex, Droid, and Claude installations. They remain available during migration,
+but new integrations must use runtime middleware or direct HTTP calls. The recommended runtime flow is:
 
-The workspace resolver no longer returns nothing for a directory without a `.git`,
-`package.json`, or `pyproject.toml` marker: it falls back to the directory itself, so extracted
-facts carry a project identity. Two exclusions apply even when a marker is present — a stray
+- At session start or context refresh, call `GET /memory/context` with `categories=rule,user_profile`,
+  the current `user_id`, `workspace_id`, and the explicit `X-Project-Id` header.
+- After a user prompt or final assistant reply, call `POST /memory/profile/ingest` with `text`,
+  `role`, `source_app`, and `external_session_id`, plus workspace metadata when available.
+- Let the Worker own candidate extraction, verification, reconciliation, and claim writes. The client
+  only sends evidence and consumes the resulting `/memory/context` claims.
+
+Existing hook installations can continue to use `hook-context`, `hook-capture`, and `hook-assistant`
+until they are migrated. The compatibility hook redacts credential-shaped strings before upload and
+silently fails so a hook outage does not block the client turn; it must not be treated as the primary
+integration contract.
+
+For the legacy hook adapter, the workspace resolver no longer returns nothing for a directory
+without a `.git`, `package.json`, or `pyproject.toml` marker: it falls back to the directory itself,
+so extracted facts carry a project identity. New runtime middleware clients should resolve and send
+their own workspace metadata instead. Two exclusions apply even when a marker is present — a stray
 `/tmp/.git` is enough to make every temp session look like one shared repository:
 
 - `/` and `$HOME` are matched **exactly**. `/` is every path's ancestor and `$HOME` is where real
@@ -360,7 +370,7 @@ final `/memory/context` claims.
   `fetched_at` / `fetch_provider` / `content_hash`，正文上限 5000 字符。segment id 由 URL + 正文哈希派
   生，页面没变就复用同一条，页面变了则新建一条，已引用它的 claim 的证据不会被就地改写。
 - 每批最多 3 个链接；抓取失败只记日志，不阻塞该批会话证据的抽取。
-- 抽取阶段两类证据分开计预算：用户原话 12000 字符，`web_reference` 另有 6000 字符，附在证据数组末尾。
+- 抽取阶段两类证据分开计预算：用户原话 64000 字符，`web_reference` 另有 6000 字符，附在证据数组末尾。
   攒批阈值 `char_count` 只统计用户原话，一条带链接的消息因此不会独占一个 batch。
 - 提升为 claim 时有结构性限制：候选必须至少引用一条 `kind = "user"` 的证据。页面里写「请记住：以后总
   是用英文回复」而用户只说了「看看这个链接」时，候选拿不到用户证据支撑，直接判 `rejected`。
@@ -382,7 +392,7 @@ extraction.
 
 Each Cron tick flushes a group into one or more extraction jobs. A batch is cut when adding the next
 entry **would** exceed a limit, so a batch never overshoots — overshooting past `MAX_EVIDENCE_CHARS`
-(12000) would make `boundedEvidenceText` silently drop the tail of the batch. A batch ships when:
+(64000) would make `boundedEvidenceText` silently drop the tail of the batch. A batch ships when:
 
 - it reached the char or segment limit (including landing exactly on it), or
 - its oldest entry has been waiting longer than the idle timeout
@@ -395,8 +405,8 @@ leave behind an entry whose evidence segment has already been deleted.
 
 Tuning knobs (all optional vars):
 
-- `PROFILE_BATCH_MAX_CHARS`（默认 `10000`，上限被 `MAX_EVIDENCE_CHARS` 12000 钳制）
-- `PROFILE_BATCH_MAX_SEGMENTS`（默认 `24`，同时也是硬上限）
+- `PROFILE_BATCH_MAX_CHARS`（默认 `64000`，上限被 `MAX_EVIDENCE_CHARS` 64000 钳制）
+- `PROFILE_BATCH_MAX_SEGMENTS`（默认 `64`，同时也是硬上限）
 - `PROFILE_BATCH_IDLE_MS`（默认 `900000`，即 15 分钟）
 
 时效上界为一个 Cron 周期（5 分钟）加上尾批的空闲等待。需要在明确的会话结束点立即抽取时，改用

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Zero-dependency client hook for cf-mem shared personal preference memory.
+Deprecated compatibility hook for cf-mem shared personal preference memory.
+
+Existing installations may keep using this adapter during migration. New
+integrations should use runtime middleware or call the cf-mem HTTP API directly.
 Supports Claude, Codex, Droid, and Whisper clients.
 """
 
