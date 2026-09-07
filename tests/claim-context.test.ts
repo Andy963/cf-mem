@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   fetchClaimsByIds: vi.fn(),
   fetchContextClaims: vi.fn(),
   fetchEvidenceByClaimIds: vi.fn(),
+  fetchGlobalProfileClaims: vi.fn(),
+  fetchWorkspaceProfileClaims: vi.fn(),
   findVectorizedClaimMatches: vi.fn(),
 }));
 
@@ -19,6 +21,8 @@ vi.mock("../src/db/d1", async () => {
     fetchClaimsByIds: mocks.fetchClaimsByIds,
     fetchContextClaims: mocks.fetchContextClaims,
     fetchEvidenceByClaimIds: mocks.fetchEvidenceByClaimIds,
+    fetchGlobalProfileClaims: mocks.fetchGlobalProfileClaims,
+    fetchWorkspaceProfileClaims: mocks.fetchWorkspaceProfileClaims,
   };
 });
 
@@ -70,6 +74,8 @@ describe("loadMemoryContext semantic retrieval", () => {
     ));
     mocks.fetchContextClaims.mockResolvedValue([]);
     mocks.fetchEvidenceByClaimIds.mockResolvedValue(new Map());
+    mocks.fetchGlobalProfileClaims.mockResolvedValue([]);
+    mocks.fetchWorkspaceProfileClaims.mockResolvedValue([]);
   });
 
   it("does not re-embed D1 candidates when Vectorize returns fewer matches than the limit", async () => {
@@ -112,6 +118,72 @@ describe("loadMemoryContext semantic retrieval", () => {
     expect(ai.run).toHaveBeenCalledOnce();
     expect(mocks.fetchContextClaims).not.toHaveBeenCalled();
     expect(mocks.fetchClaimsByIds).toHaveBeenCalled();
+  });
+
+  it("returns project facts for a different user identity", async () => {
+    const env = {
+      AI: { run: vi.fn(async () => ({ data: [[1, 0]] })) } as unknown as Ai,
+      DB: {} as D1Database,
+      SEGMENTS_INDEX: {},
+      CLAIMS_INDEX: {},
+    } as unknown as Env;
+    const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+    const result = await loadMemoryContext(
+      env,
+      { projectId: "project-1", namespace: "project:project-1" },
+      {
+        userId: "different-user",
+        sessionId: null,
+        query: "Which architectural decision does this project use?",
+        types: ["decision"],
+        categories: ["domain_fact"],
+        scopeId: null,
+        limit: 5,
+        workspaceId: null,
+        profileOnly: false,
+      },
+      ctx,
+    );
+
+    expect(result.claims).toHaveLength(3);
+    expect(result.claims.every((claim) => claim.scope_kind === "project")).toBe(true);
+  });
+
+  it("does not return another user's profile claims", async () => {
+    const env = {
+      DB: {} as D1Database,
+      SEGMENTS_INDEX: {},
+      CLAIMS_INDEX: {},
+    } as unknown as Env;
+    const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+    const result = await loadMemoryContext(
+      env,
+      { projectId: "project-1", namespace: "project:project-1" },
+      {
+        userId: "different-user",
+        sessionId: null,
+        query: null,
+        types: null,
+        categories: ["user_profile"],
+        scopeId: null,
+        limit: 5,
+        workspaceId: null,
+        profileOnly: false,
+      },
+      ctx,
+    );
+
+    expect(result.claims).toEqual([]);
+    expect(mocks.fetchGlobalProfileClaims).toHaveBeenCalledWith(
+      env.DB,
+      "project-1",
+      "different-user",
+      5,
+      "user_profile",
+      null,
+    );
   });
 
   it("returns before the usage update completes and keeps the update in waitUntil", async () => {

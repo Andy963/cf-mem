@@ -406,6 +406,31 @@ async function fetchOwnerClaims(env: Env, projectId: string, ownerId: string, wo
   return await fetchOwnerClaimRows(env.DB, projectId, ownerId, MAX_ACTIVE_OWNER_CLAIMS, MAX_INACTIVE_OWNER_CLAIMS, workspaceId);
 }
 
+export interface ResolvedProfileClaimScope {
+  scopeKind: StoredClaimRow["scope_kind"];
+  scopeId: string;
+}
+
+export function resolveProfileClaimScope(
+  existing: Pick<StoredClaimRow, "scope_kind" | "scope_id"> | null,
+  category: ClaimCategory,
+  type: ClaimType | undefined,
+  extractedScopeId: string | undefined,
+  ownerId: string,
+  projectId: string,
+): ResolvedProfileClaimScope {
+  if (existing) return { scopeKind: existing.scope_kind, scopeId: existing.scope_id };
+  if (category === "tool_insight") {
+    const scopeId = extractedScopeId?.trim();
+    if (!scopeId) throw new Error("extractor_tool_insight_scope_id_required");
+    return { scopeKind: "user", scopeId };
+  }
+  if (category === "user_profile" || type === "preference") {
+    return { scopeKind: "user", scopeId: ownerId };
+  }
+  return { scopeKind: "project", scopeId: projectId };
+}
+
 export const DEFAULT_EXTRACTOR_INSTRUCTIONS = [
   "Produce memory candidates only. Do not decide whether they become active claims.",
   "Classify every candidate as preference, instruction, decision, profile, current_state, opinion, or none, and assign exactly one category: rule, tool_insight, user_profile, or domain_fact. One evidence batch may legitimately yield several candidates in different categories; emit each separately rather than forcing a single classification.",
@@ -1146,23 +1171,22 @@ async function applyOneClaim(
         : claimCategory === "rule" || claimCategory === "user_profile"
           ? "global"
           : "semantic");
-  // Global and workspace rules are project-scoped so they can be routed even
-  // when a context request has no user_id. Keep the existing scope for a
-  // legacy user-scoped rule being explicitly reconciled.
-  const claimScopeKind = existing?.scope_kind ?? (claimCategory === "rule" ? "project" : "user");
-  const claimScopeId = existing?.scope_id
-    ?? (claimCategory === "rule"
-      ? scope.projectId
-      : claimCategory === "tool_insight" ? extracted.scope_id?.trim() : job.owner_id);
-  if (!claimScopeId) throw new Error("extractor_tool_insight_scope_id_required");
+  const claimScope = resolveProfileClaimScope(
+    existing ?? null,
+    claimCategory,
+    claimType as ClaimType | undefined,
+    extracted.scope_id,
+    job.owner_id,
+    scope.projectId,
+  );
   const claimWorkspaceId = applicability === "workspace"
     ? existing?.workspace_id ?? job.workspace_id
     : null;
   const mutation = normalizeClaimMutationRequest({
     operation: extracted.operation,
     claim: {
-      scope_kind: claimScopeKind,
-      scope_id: claimScopeId,
+      scope_kind: claimScope.scopeKind,
+      scope_id: claimScope.scopeId,
       category: claimCategory,
       type: claimType,
       subject: existing?.subject ?? extracted.subject,
