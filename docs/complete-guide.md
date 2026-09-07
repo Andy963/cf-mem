@@ -528,9 +528,11 @@ LLM（提取器端点）三选一裁决：`same` 转 reinforce、`update` 按
 `CLAIM_DEDUP_AUTO_REPLACE` 决定普通分类的 `update` 是否自动替换（默认关闭，报错提示改用 supersede）；
 `rule` 与 `tool_insight` 的 `update` 或 `conflict` 按分类策略自动 supersede 旧版本，其他分类的 `conflict`
 拒绝写入并提示走显式操作。LLM 不可用时灰区降级为直接插入，宁可暂存可能重复的 claim，也不静默合并。
-`PROFILE_EXTRACTOR_PROTOCOL=responses` 时灰区裁决使用 Responses API；并发写入按
-project/scope/category/type/workspace 加 D1 lease 锁，锁竞争时快速失败并由客户端或后台 job 重试，
-避免多个请求同时通过语义检查。Vectorize 写入存在延迟可见窗口时，Worker
+`PROFILE_EXTRACTOR_PROTOCOL=responses` 时灰区裁决使用 Responses API；并发 create 会先在 lease 外完成
+embedding、Vectorize 查询和灰区裁决，再按 project/scope/category/type/workspace 获取短期 D1 lease，
+用 active claim 的 `(id, updated_at)` 快照校验后只在锁内完成最终 D1 身份检查和写入。快照变化时释放
+lease 并重新计算；锁竞争仍快速失败并由客户端或后台 job 重试，避免在 D1 锁内执行昂贵的外部调用。
+Vectorize 写入存在延迟可见窗口时，Worker
 会从同一语义 scope 的 D1 active claims 取回未出现在向量结果中的候选，重新嵌入后参与 cosine 比较。
 
 显式用户来源的 claim 必须提供同项目中已有的 `evidence_segment_ids`。例如：

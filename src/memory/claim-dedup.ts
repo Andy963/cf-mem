@@ -1,5 +1,6 @@
 import { embedTexts } from "../ai/embedding";
 import {
+  fetchActiveClaimScopeFingerprint,
   fetchActiveClaimsBySemanticScope,
   type StoredClaimRow,
 } from "../db/d1";
@@ -101,16 +102,59 @@ interface SemanticMatch {
   score: number;
 }
 
+export interface SemanticScopeSnapshot {
+  claims: Array<{ id: string; updatedAt: number }>;
+}
+
+export interface SemanticResolution {
+  action: SemanticAction;
+  snapshot: SemanticScopeSnapshot;
+}
+
+function semanticScopeSnapshot(
+  claims: ReadonlyArray<{ id: string; updated_at: number }>,
+): SemanticScopeSnapshot {
+  return {
+    claims: claims
+      .map((claim) => ({ id: claim.id, updatedAt: claim.updated_at }))
+      .sort((left, right) => left.id.localeCompare(right.id)),
+  };
+}
+
+export function semanticScopeSnapshotsEqual(
+  left: SemanticScopeSnapshot,
+  right: SemanticScopeSnapshot,
+): boolean {
+  if (left.claims.length !== right.claims.length) return false;
+  const leftClaims = [...left.claims].sort((a, b) => a.id.localeCompare(b.id));
+  const rightClaims = [...right.claims].sort((a, b) => a.id.localeCompare(b.id));
+  return leftClaims.every((claim, index) => {
+    const other = rightClaims[index];
+    return claim.id === other?.id && claim.updatedAt === other.updatedAt;
+  });
+}
+
+export async function isSemanticScopeSnapshotCurrent(
+  db: D1Database,
+  projectId: string,
+  claim: Pick<ClaimInput, "scopeKind" | "scopeId" | "category" | "type" | "workspaceId">,
+  snapshot: SemanticScopeSnapshot,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const currentClaims = await fetchActiveClaimScopeFingerprint(db, projectId, claim, now);
+  return semanticScopeSnapshotsEqual(snapshot, semanticScopeSnapshot(currentClaims));
+}
+
 async function findNearestSemanticMatch(
   env: Env,
   db: D1Database,
   projectId: string,
   claim: ClaimInput,
   config: DedupConfig,
-): Promise<SemanticMatch | null> {
-  if (!env.CLAIMS_INDEX || !claim.canonicalText.trim()) return null;
+): Promise<{ match: SemanticMatch | null; snapshot: SemanticScopeSnapshot }> {
+  if (!env.CLAIMS_INDEX || !claim.canonicalText.trim()) return { match: null, snapshot: { claims: [] } };
   const [incomingVector] = await embedTexts(env, [claim.canonicalText]);
-  if (!incomingVector || incomingVector.length === 0) return null;
+  if (!incomingVector || incomingVector.length === 0) return { match: null, snapshot: { claims: [] } };
 
   const matches = await findVectorizedClaimMatches(env, {
     projectId,
@@ -127,7 +171,8 @@ async function findNearestSemanticMatch(
   });
   const now = Date.now();
   const candidates = await fetchActiveClaimsBySemanticScope(db, projectId, claim, now);
-  if (candidates.length === 0) return null;
+  const snapshot = semanticScopeSnapshot(candidates);
+  if (candidates.length === 0) return { match: null, snapshot };
 
   const candidateIds = new Set(candidates.map((candidate) => candidate.id));
   const usableMatches = matches.filter((match) => candidateIds.has(match.id));
@@ -163,7 +208,7 @@ async function findNearestSemanticMatch(
       }
     }
   }
-  return best;
+  return { match: best, snapshot };
 }
 
 function verdictExtraction(content: unknown): Verdict {
@@ -283,17 +328,16 @@ export async function judgeClaimPair(
 // Decides what to do with an incoming claim that has no deterministic identity
 // twin. Throws ClaimSchemaError only for judged conflicts (deliberate hard stop
 // so pipelines surface real contradictions instead of silent divergence).
-export async function resolveSemanticDuplicate(
+async function resolveSemanticMatch(
   env: Env,
-  db: D1Database,
   projectId: string,
   claim: ClaimInput,
   config: DedupConfig,
+  match: SemanticMatch | null,
 ): Promise<SemanticAction> {
   const insertMeta = (matched: SemanticMatch | null, verdict: DedupMeta["verdict"], provider: DedupMeta["provider"] = "vector"): DedupMeta =>
     ({ provider, matched_claim_id: matched?.claim.id ?? null, score: matched?.score ?? null, verdict });
 
-  const match = await findNearestSemanticMatch(env, db, projectId, claim, config);
   if (!match) return { kind: "insert", meta: insertMeta(null, null) };
 
   const isRuleOrTool = claim.category === "rule" || claim.category === "tool_insight";
@@ -379,6 +423,31 @@ export async function resolveSemanticDuplicate(
     ),
     { dedup: { score: match.score, matched_claim_id: match.claim.id } },
   );
+}
+
+export async function resolveSemanticDuplicateWithSnapshot(
+  env: Env,
+  db: D1Database,
+  projectId: string,
+  claim: ClaimInput,
+  config: DedupConfig,
+): Promise<SemanticResolution> {
+  const search = await findNearestSemanticMatch(env, db, projectId, claim, config);
+  return {
+    action: await resolveSemanticMatch(env, projectId, claim, config, search.match),
+    snapshot: search.snapshot,
+  };
+}
+
+export async function resolveSemanticDuplicate(
+  env: Env,
+  db: D1Database,
+  projectId: string,
+  claim: ClaimInput,
+  config: DedupConfig,
+): Promise<SemanticAction> {
+  const resolution = await resolveSemanticDuplicateWithSnapshot(env, db, projectId, claim, config);
+  return resolution.action;
 }
 
 function dedupLockKey(
