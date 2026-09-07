@@ -39,12 +39,10 @@ import {
   withClaimDedupLock,
 } from "./claim-dedup";
 import { chunkArray } from "../utils";
-
 function newClaimId(): string {
   // UUIDs are globally unique while remaining within Vectorize's 64-byte ID limit.
   return `claim_${crypto.randomUUID()}`;
 }
-
 const USAGE_RECORD_DEDUP_MS = 10 * 60 * 1000;
 
 /**
@@ -70,7 +68,6 @@ export async function recordClaimUsage(env: Env, projectId: string, claimIds: st
     }
   }
 }
-
 function parseValue(row: StoredClaimRow): unknown {
   try {
     return JSON.parse(row.value_json);
@@ -78,7 +75,6 @@ function parseValue(row: StoredClaimRow): unknown {
     return null;
   }
 }
-
 function toClaimResponse(row: StoredClaimRow, evidence: Array<{ segmentId: string; relation: string }> = []): Record<string, unknown> {
   const category = row.category ?? "domain_fact";
   return {
@@ -106,9 +102,8 @@ function toClaimResponse(row: StoredClaimRow, evidence: Array<{ segmentId: strin
     evidence: evidence.map(({ segmentId, relation }) => ({ segment_id: segmentId, relation })),
     created_at: row.created_at,
     updated_at: row.updated_at,
-  };
+};
 }
-
 /**
  * Calculates dynamic decay score (ActiveScore) for domain facts and user profile.
  * ActiveScore = confidence * exp(-0.023 * deltaDays) * (1 + ln(1 + use_count))
@@ -123,17 +118,14 @@ export function calculateActiveScore(
   const confidence = Number.isFinite(claim.confidence) ? claim.confidence : 1.0;
   return confidence * Math.exp(-0.023 * deltaDays) * (1 + Math.log(1 + useCount));
 }
-
 async function verifyEvidence(db: D1Database, projectId: string, segmentIds: string[]): Promise<void> {
   if (segmentIds.length === 0) return;
-
   const existing = await fetchSegmentsInProject(db, projectId, segmentIds);
   const missing = segmentIds.filter((segmentId) => !existing.has(segmentId));
   if (missing.length > 0) {
     throw new ClaimSchemaError("All evidence_segment_ids must reference memory segments in the authenticated project");
   }
 }
-
 async function requireClaim(db: D1Database, projectId: string, claimId: string): Promise<StoredClaimRow> {
   const claim = await fetchClaimById(db, projectId, claimId);
   if (!claim) throw new ClaimSchemaError("Claim was not found in the authenticated project");
