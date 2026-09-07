@@ -2,7 +2,6 @@ import { fetchByIds, fetchClaimById, fetchOwnerClaims as fetchOwnerClaimRows, ty
 import type { Env } from "../env";
 import type { ProjectScope } from "../project";
 import { mutateClaim } from "./claim-store";
-import { syncClaimVector } from "./claim-index";
 import {
   type ClaimApplicability,
   type ClaimCategory,
@@ -1098,7 +1097,6 @@ async function applyOneClaim(
       throw new Error("extractor_claim_category_mismatch");
     }
     if (extracted.operation === "retract" && activeById.get(claimId)?.status === "retracted") {
-      await syncClaimVector(env, activeById.get(claimId) as StoredClaimRow);
       return;
     }
     if (activeById.get(claimId)?.status !== "active") throw new Error("extractor_claim_inactive_claim_id");
@@ -1129,7 +1127,6 @@ async function applyOneClaim(
     ) {
       throw new Error("extractor_claim_conflicting_replacement");
     }
-    await syncClaimVector(env, replacement);
     return;
   }
   const claimType = existing?.type ?? extracted.type;

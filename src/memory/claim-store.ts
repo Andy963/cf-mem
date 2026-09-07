@@ -28,7 +28,7 @@ import {
   type ContextRequest,
   isTrivialPrompt,
 } from "./claims";
-import { cosineSimilarity, findVectorizedClaimMatches, syncClaimVector } from "./claim-index";
+import { cosineSimilarity, findVectorizedClaimMatches } from "./claim-index";
 import {
   ClaimDedupLockBusyError,
   isSemanticScopeSnapshotCurrent,
@@ -307,10 +307,6 @@ export async function mutateClaim(
   const db = env.DB;
   if (request.operation === "create" || request.operation === "supersede") {
     const result = await createClaim(env, db, projectScope, request.claim, request.operation);
-    if (result.supersededClaim) {
-      await syncClaimVector(env, { ...result.supersededClaim, status: "superseded" });
-    }
-    await syncClaimVector(env, result.claim);
     const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, [result.claim.id]);
     return toClaimResponse(result.claim, evidence.get(result.claim.id));
   }
@@ -321,7 +317,6 @@ export async function mutateClaim(
 
   const claim = await requireClaim(db, projectScope.projectId, request.claimId);
   if (request.operation === "retract" && claim.status === "retracted") {
-    await syncClaimVector(env, claim);
     const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, [claim.id]);
     return toClaimResponse(claim, evidence.get(claim.id));
   }
@@ -339,7 +334,6 @@ export async function mutateClaim(
   }
 
   const updated = await requireClaim(db, projectScope.projectId, claim.id);
-  await syncClaimVector(env, updated);
   const evidence = await fetchEvidenceByClaimIds(db, projectScope.projectId, [claim.id]);
   return toClaimResponse(updated, evidence.get(claim.id));
 }
