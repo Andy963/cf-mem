@@ -42,23 +42,22 @@ export function getBearerToken(request: Request): string | null {
   return match?.[1]?.trim() ?? null;
 }
 
-export function constantTimeEqual(left: string, right: string): boolean {
-  const leftBytes = new TextEncoder().encode(left);
-  const rightBytes = new TextEncoder().encode(right);
-  const length = Math.max(leftBytes.length, rightBytes.length);
-  let difference = leftBytes.length ^ rightBytes.length;
-  for (let index = 0; index < length; index += 1) {
-    difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
-  }
-  return difference === 0;
+export async function constantTimeEqual(left: string, right: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const [leftDigest, rightDigest] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(left)),
+    crypto.subtle.digest("SHA-256", encoder.encode(right)),
+  ]);
+
+  return crypto.subtle.timingSafeEqual(leftDigest, rightDigest);
 }
 
-export function isAuthorized(request: Request, expectedToken: string): boolean {
+export async function isAuthorized(request: Request, expectedToken: string): Promise<boolean> {
   const bearerToken = getBearerToken(request);
-  if (bearerToken && constantTimeEqual(bearerToken, expectedToken)) return true;
+  if (bearerToken && await constantTimeEqual(bearerToken, expectedToken)) return true;
 
   const apiKey = request.headers.get("X-Api-Key") ?? request.headers.get("x-api-key");
-  return Boolean(apiKey && constantTimeEqual(apiKey, expectedToken));
+  return Boolean(apiKey && await constantTimeEqual(apiKey, expectedToken));
 }
 
 export function unauthorizedResponse(env: HttpEnv, realm: string): Response {
