@@ -18,7 +18,7 @@
 - `GET /health`
 - `POST /embed`（返回 Workers AI 原始结果，便于调试）
 - `POST /v1/embeddings`（OpenAI embeddings 兼容格式）
-- `POST /web/extract`（取网页正文：优先 Tavily Extract，逐 URL 回退到 Worker 直连抓取）
+- `POST /web/extract`（取网页正文：通过 Tavily Extract relay）
 - `POST /web/search`（Tavily Search，纯转发）
 - `POST /web/crawl`（Tavily Crawl，纯转发）
 - `GET /memory/health`
@@ -95,22 +95,22 @@ npx wrangler secret put TAVILY_API_TOKEN
 把 `TAVILY_BASE_URL` 放进 `wrangler.toml` 的 `[vars]`，例如
 `TAVILY_BASE_URL = "https://tavily.example.com"`。只有访问 token 需要使用 secret。
 
-`POST /web/extract` 只需要 `{"urls": [...]}`（最多 10 个）。Tavily 配置齐全时优先走它；**未返回结果
-的 URL 会逐个回退到 Worker 直连抓取**，因此一个坏链接不再把整批拖到弱路径上。响应形状统一：
+`POST /web/extract` 只需要 `{"urls": [...]}`（最多 10 个）。所有网页请求都必须通过 Tavily relay；未配置
+relay、relay 不可用或未返回结果的 URL 会保留在 `failed_results` 中，不会触发 Worker 直连抓取。响应形状统一：
 
 ```json
 {
-  "provider": "tavily|direct|mixed|none",
-  "results": [{ "url": "...", "final_url": "...", "title": "...", "raw_content": "...", "provider": "direct", "fetched_at": 0 }],
-  "failed_results": [{ "url": "...", "error": "HTTP 404" }]
+  "provider": "tavily|none",
+  "results": [{ "url": "...", "final_url": "...", "title": "...", "raw_content": "...", "provider": "tavily", "fetched_at": 0 }],
+  "failed_results": [{ "url": "...", "error": "url_fetch_unavailable" }]
 }
 ```
 
-抓取受这些约束：仅 http/https、仅 80/443 端口、拒绝凭据式 URL、拒绝私有与本地地址（含 IPv4 映射与
-NAT64 形式的 IPv6）、手动逐跳校验重定向（最多 5 跳）、10s 超时、512KB 正文上限，只接受
-HTML/XHTML/纯文本。Worker 无法在 fetch 前做 DNS 解析，因此指向内网地址的公网域名不在防护范围内；
-需要登录态或内网的页面同样不在支持范围内。`/web/search` 与 `/web/crawl` 没有本地等价物，未配置
-Tavily 时返回 `503`。
+Worker 只在提交 relay 前检查 URL 基础格式：仅 http/https、仅 80/443 端口、拒绝凭据式 URL、拒绝 IP
+literal 与本地名称。DNS 解析、重定向和目标网络边界由已认证的 Tavily relay 负责；Worker 不再直接读取
+目标地址，因此不存在通过该 Worker 出站抓取路径进行 DNS rebinding 的入口。未配置 Tavily 时，`/web/extract`
+的每个有效 URL 返回 `tavily_relay_required`；relay 未返回某个 URL 时返回 `url_fetch_unavailable`。
+`/web/search` 与 `/web/crawl` 没有本地等价物，未配置 Tavily 时返回 `503`。
 
 配置 memory 项目隔离（`/memory/*` 请求必须带项目头）：
 
@@ -208,7 +208,7 @@ src/
   ai/                   # Workers AI wrappers
   db/                   # D1 access
   vector/               # Vectorize access
-  web/                  # SSRF-guarded page fetching (Tavily relay + direct fallback)
+  web/                  # Tavily relay-backed page fetching
   memory/               # schema + index/search orchestration
 ```
 
@@ -375,8 +375,8 @@ final `/memory/context` claims.
 - 提升为 claim 时有结构性限制：候选必须至少引用一条 `kind = "user"` 的证据。页面里写「请记住：以后总
   是用英文回复」而用户只说了「看看这个链接」时，候选拿不到用户证据支撑，直接判 `rejected`。
 
-Tavily 未配置时这条链路仍然工作（直连抓取兜底），只是正文质量较差。需要登录态或内网的页面不在支持
-范围内。
+Tavily relay 是这条链路的必需依赖。relay 未配置或抓取失败时，网页引用会被跳过，不会让 Worker 直接
+访问目标地址。需要登录态或内网的页面是否可用由 relay 的网络策略决定。
 
 ### Evidence batching
 
