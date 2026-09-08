@@ -36,18 +36,14 @@ async function readJsonBody(request: Request, env: Env): Promise<JsonRecord | Re
   }
 }
 
-function resultProvider(results: PageFetchResult[]): "tavily" | "direct" | "mixed" | "none" {
-  const providers = new Set(results.filter((result): result is Exclude<PageFetchResult, { error: string }> => !isFetchFailure(result))
-    .map((page) => page.provider));
-  if (providers.size === 0) return "none";
-  if (providers.size > 1) return "mixed";
-  return [...providers][0];
+function resultProvider(results: PageFetchResult[]): "tavily" | "none" {
+  return results.some((result) => !isFetchFailure(result)) ? "tavily" : "none";
 }
 
 /**
- * Returns page text for a list of links regardless of whether the Tavily relay
- * is reachable: every URL the relay does not answer for falls back to a direct
- * fetch individually, so a single failed link no longer downgrades the batch.
+ * Returns page text for a list of links through the Tavily relay. Relay
+ * failures remain attached to their URLs so callers can handle partial batches
+ * without exposing a Worker outbound fetch path.
  */
 async function handleExtract(request: Request, env: Env): Promise<Response> {
   const body = await readJsonBody(request, env);
