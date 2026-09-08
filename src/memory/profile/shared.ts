@@ -85,46 +85,117 @@ export interface ReconciliationDecision {
 
 export const CLAIM_TYPES = new Set(["preference", "instruction", "decision", "profile"]);
 
+const CLAIM_OPERATIONS = ["create", "reinforce", "supersede", "retract"] as const;
+type ClaimOperation = (typeof CLAIM_OPERATIONS)[number];
+
+const CANDIDATE_KINDS = [
+  "preference",
+  "instruction",
+  "decision",
+  "profile",
+  "current_state",
+  "opinion",
+  "none",
+] as const;
+type CandidateKind = (typeof CANDIDATE_KINDS)[number];
+
+const AGENT_RELEVANCES = ["global_behavior", "contextual", "none"] as const;
+type AgentRelevance = (typeof AGENT_RELEVANCES)[number];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && Boolean(value.trim());
+}
+
+function isJsonValue(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (!isRecord(value)) return false;
+  return Object.values(value).every(isJsonValue);
+}
+
+function isClaimOperation(value: unknown): value is ClaimOperation {
+  return typeof value === "string" && (CLAIM_OPERATIONS as readonly string[]).includes(value);
+}
+
+function isClaimType(value: unknown): value is ClaimType {
+  return typeof value === "string" && CLAIM_TYPES.has(value);
+}
+
+function isClaimCategory(value: unknown): value is ClaimCategory {
+  return typeof value === "string" && (CLAIM_CATEGORIES as readonly string[]).includes(value);
+}
+
+function isCandidateKind(value: unknown): value is CandidateKind {
+  return typeof value === "string" && (CANDIDATE_KINDS as readonly string[]).includes(value);
+}
+
+function isAgentRelevance(value: unknown): value is AgentRelevance {
+  return typeof value === "string" && (AGENT_RELEVANCES as readonly string[]).includes(value);
+}
+
 export function normalizedExtractorCandidate(value: unknown, workspaceId: string | null = null): ExtractedClaim | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  let candidate = value as Record<string, unknown>;
-  if (candidate.operation && typeof candidate.operation === "object" && !Array.isArray(candidate.operation)) {
-    const nested = candidate.operation as Record<string, unknown>;
+  if (!isRecord(value)) return null;
+  let candidate = value;
+  if (isRecord(candidate.operation)) {
+    const nested = candidate.operation;
+    if (hasOwn(nested, "claim_id") || hasOwn(nested, "replaces_claim_id")) return null;
     candidate = { ...candidate, ...nested, operation: "create" };
   }
 
-  const typeStr = typeof candidate.type === "string" ? candidate.type : undefined;
-  const kindStr = typeof candidate.candidate_kind === "string" ? candidate.candidate_kind : undefined;
-  const effectiveType = (typeStr && CLAIM_TYPES.has(typeStr))
-    ? typeStr
-    : (kindStr && CLAIM_TYPES.has(kindStr) ? kindStr : undefined);
-  const effectiveKind = kindStr ?? effectiveType;
+  const rawOperation = candidate.operation;
+  const operation = rawOperation === undefined ? "create" : rawOperation;
+  if (!isClaimOperation(operation)) return null;
+
+  const rawType = candidate.type === null ? undefined : candidate.type;
+  const effectiveType = rawType === undefined
+    ? undefined
+    : isClaimType(rawType) ? rawType : null;
+  if (effectiveType === null) return null;
+
+  const rawKind = candidate.candidate_kind;
+  if (rawKind !== undefined && !isCandidateKind(rawKind)) return null;
+  const effectiveKind = rawKind ?? effectiveType;
+  if (effectiveKind === undefined) return null;
+  if (effectiveType !== undefined && effectiveKind !== effectiveType) return null;
+  if (isClaimType(effectiveKind) && effectiveType === undefined) return null;
 
   let applicability: ClaimApplicability | undefined;
+  const applicabilityExplicit = candidate.applicability !== undefined && candidate.applicability !== null;
+  if (applicabilityExplicit && typeof candidate.applicability !== "string") return null;
   if (typeof candidate.applicability === "string") {
     const appLower = candidate.applicability.toLowerCase();
     if (appLower === "global" || appLower === "always" || appLower.includes("所有") || appLower.includes("全局")) {
       applicability = "global";
     } else if (appLower === "workspace" || appLower.includes("工作区")) {
       applicability = "workspace";
-    } else {
+    } else if (appLower === "semantic") {
       applicability = "semantic";
+    } else {
+      return null;
     }
   }
 
-  const explicit = candidate.explicit !== false;
-  const agentRelevance = candidate.agent_relevance === "contextual" || candidate.agent_relevance === "global_behavior"
-    ? candidate.agent_relevance
-    : "global_behavior";
+  const explicit = candidate.explicit === undefined ? true : candidate.explicit;
+  if (typeof explicit !== "boolean") return null;
+  const agentRelevance = candidate.agent_relevance === undefined ? "global_behavior" : candidate.agent_relevance;
+  if (!isAgentRelevance(agentRelevance)) return null;
 
   const categoryExplicit = candidate.category !== undefined && candidate.category !== null;
-  const applicabilityExplicit = candidate.applicability !== undefined && candidate.applicability !== null;
   let category: ClaimCategory | undefined;
   if (categoryExplicit) {
-    if (typeof candidate.category !== "string" || !(CLAIM_CATEGORIES as readonly string[]).includes(candidate.category)) return null;
-    category = candidate.category as ClaimCategory;
-  } else if (effectiveType && CLAIM_TYPES.has(effectiveType)) {
-    category = inferClaimCategory(effectiveType as ClaimType, applicability, workspaceId);
+    if (!isClaimCategory(candidate.category)) return null;
+    category = candidate.category;
+  } else if (effectiveType) {
+    category = inferClaimCategory(effectiveType, applicability, workspaceId);
   } else {
     category = "domain_fact";
   }
@@ -137,23 +208,71 @@ export function normalizedExtractorCandidate(value: unknown, workspaceId: string
     return null;
   }
 
-  const val = candidate.value !== undefined ? candidate.value : candidate.canonical_text;
-  const op = typeof candidate.operation === "string" ? candidate.operation : "create";
+  const claimId = candidate.claim_id === null ? undefined : candidate.claim_id;
+  if (claimId !== undefined && (!isNonEmptyString(claimId) || claimId.trim().length > 512)) return null;
+  const replacesClaimId = candidate.replaces_claim_id === null ? undefined : candidate.replaces_claim_id;
+  if (replacesClaimId !== undefined && (!isNonEmptyString(replacesClaimId) || replacesClaimId.trim().length > 512)) return null;
 
-  return {
-    ...candidate,
+  if (operation === "reinforce" || operation === "retract") {
+    if (!isNonEmptyString(claimId)) return null;
+  } else if (operation === "supersede" && !isNonEmptyString(replacesClaimId)) {
+    return null;
+  }
+
+  const evidenceSegmentIds = candidate.evidence_segment_ids;
+  if (evidenceSegmentIds !== undefined) {
+    if (!Array.isArray(evidenceSegmentIds) || !evidenceSegmentIds.every(isNonEmptyString)) return null;
+  }
+
+  const validUntil = candidate.valid_until;
+  if (validUntil !== undefined && validUntil !== null
+    && (typeof validUntil !== "number" || !Number.isInteger(validUntil) || validUntil < 0)) {
+    return null;
+  }
+
+  const confidence = candidate.confidence;
+  if (operation === "create" || operation === "supersede") {
+    if (!isNonEmptyString(candidate.subject)
+      || !isNonEmptyString(candidate.memory_key)
+      || !isNonEmptyString(candidate.canonical_text)
+      || !hasOwn(candidate, "value")
+      || !isJsonValue(candidate.value)
+      || typeof confidence !== "number"
+      || !Number.isFinite(confidence)
+      || confidence < 0
+      || confidence > 1) {
+      return null;
+    }
+  } else if (confidence !== undefined && confidence !== null
+    && (typeof confidence !== "number" || !Number.isFinite(confidence) || confidence < 0 || confidence > 1)) {
+    return null;
+  }
+
+  const normalized: ExtractedClaim = {
+    operation,
     category: resolvedCategory,
     category_explicit: categoryExplicit,
     applicability_explicit: applicabilityExplicit,
     scope_id: typeof rawScopeId === "string" ? rawScopeId.trim() : undefined,
     type: effectiveType,
-    candidate_kind: effectiveKind as any,
+    candidate_kind: effectiveKind,
     applicability,
     explicit,
     agent_relevance: agentRelevance,
-    value: val,
-    operation: op as any,
-  } as ExtractedClaim;
+    evidence_segment_ids: Array.isArray(evidenceSegmentIds)
+      ? evidenceSegmentIds.map((id) => id.trim())
+      : undefined,
+    claim_id: typeof claimId === "string" ? claimId.trim() : undefined,
+    replaces_claim_id: typeof replacesClaimId === "string" ? replacesClaimId.trim() : undefined,
+    valid_until: typeof validUntil === "number" ? validUntil : undefined,
+    confidence: typeof confidence === "number" ? confidence : undefined,
+    subject: typeof candidate.subject === "string" ? candidate.subject.trim() : undefined,
+    memory_key: typeof candidate.memory_key === "string" ? candidate.memory_key.trim() : undefined,
+    canonical_text: typeof candidate.canonical_text === "string" ? candidate.canonical_text.trim() : undefined,
+    value: hasOwn(candidate, "value") ? candidate.value : undefined,
+  };
+
+  return normalized;
 }
 
 
