@@ -56,7 +56,7 @@ export default {
       if (!apiToken) {
         return jsonResponse(env, { error: { message: "API_TOKEN is required" } }, { status: 500 });
       }
-      if (!isAuthorized(request, apiToken)) {
+      if (!(await isAuthorized(request, apiToken))) {
         return unauthorizedResponse(env, "cf-mem");
       }
 
@@ -67,7 +67,7 @@ export default {
 
     if (url.pathname.startsWith("/memory/")) {
       try {
-        const projectScope = resolveProjectScope(request, env);
+        const projectScope = await resolveProjectScope(request, env);
         await validateRequestProjectId(request, projectScope.projectId);
         return await handleMemoryRequest(request, env, projectScope, ctx);
       } catch (error) {

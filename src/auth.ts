@@ -91,10 +91,10 @@ function parseLegacyProjectTokenMap(raw: string | undefined): Map<string, string
   return tokenToProject;
 }
 
-export function resolveProjectScope(
+export async function resolveProjectScope(
   request: Request,
   env: Pick<Env, "API_TOKEN" | "MEMORY_API_TOKEN" | "ALLOWED_MEMORY_PROJECTS" | "PROJECT_TOKENS_JSON" | "PERSONAL_MEMORY_TOKEN" | "PERSONAL_MEMORY_PROJECT_ID">,
-): ProjectScope {
+): Promise<ProjectScope> {
   const requestToken = getRequestToken(request);
   if (!requestToken) {
     throw new RequestAuthError(401, "Unauthorized");
@@ -116,7 +116,7 @@ export function resolveProjectScope(
     throw new RequestAuthError(400, "X-Project-Id is invalid");
   }
 
-  if (sharedToken && constantTimeEqual(requestToken, sharedToken)) {
+  if (sharedToken && await constantTimeEqual(requestToken, sharedToken)) {
     // The shared memory credential is intentionally project-agnostic. The
     // explicit header and normalizeProjectId above define the routing boundary;
     // the deprecated allowlist must not block dynamic workspace onboarding.
@@ -130,8 +130,13 @@ export function resolveProjectScope(
   const legacyProjectTokens = env.PROJECT_TOKENS_JSON?.trim()
     ? parseLegacyProjectTokenMap(env.PROJECT_TOKENS_JSON)
     : new Map<string, string>();
-  let legacyProjectId = legacyProjectTokens.get(requestToken) ?? null;
-  if (personalToken && constantTimeEqual(requestToken, personalToken)) {
+  let legacyProjectId: string | null = null;
+  for (const [legacyToken, configuredProjectId] of legacyProjectTokens) {
+    if (await constantTimeEqual(requestToken, legacyToken)) {
+      legacyProjectId = configuredProjectId;
+    }
+  }
+  if (personalToken && await constantTimeEqual(requestToken, personalToken)) {
     legacyProjectId = normalizeProjectId(env.PERSONAL_MEMORY_PROJECT_ID ?? "personal");
     if (!legacyProjectId) {
       throw new RequestAuthError(500, "PERSONAL_MEMORY_PROJECT_ID is invalid");
