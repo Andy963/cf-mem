@@ -18,6 +18,19 @@ const REFERENCE_HASH_CHARS = 40;
 const ROLE_MARKER_PATTERN = /^([ \t]*)\[(user|assistant|system|web_reference)\]/gim;
 const CLIENT_REFERENCE_BLOCK = /<referenced_web_content\b[^>]*>[\s\S]*?<\/referenced_web_content\s*>/gi;
 const CLIENT_REFERENCE_TAG = /<\/?referenced_web_content\b[^>]*>/gi;
+const SYSTEM_SCAFFOLDING_TAGS = [
+  "instructions",
+  "system-reminder",
+  "system_prompt",
+  "skill_system",
+  "available_skills",
+  "requested_skills",
+  "skills_instructions",
+  "tools_instructions",
+  "recalled_memory",
+] as const;
+const AGENT_HEADER_PATTERN = /^[ \t]*#\s*AGENTS\.md instructions[ \t]*$/gim;
+const AGENT_IDENTITY_PATTERN = /^[ \t]*You are [^\r\n]*\([ \t]*id[ \t]*:[^\)\r\n]+\)[^\r\n]*$/gim;
 
 export function neutralizeEvidenceMarkers(text: string): string {
   return text.replace(ROLE_MARKER_PATTERN, "$1($2)");
@@ -32,8 +45,18 @@ export function stripClientWebReferenceBlocks(text: string): string {
   return text.replace(CLIENT_REFERENCE_BLOCK, " ").replace(CLIENT_REFERENCE_TAG, " ");
 }
 
+function stripSystemScaffolding(text: string): string {
+  let sanitized = text;
+  for (const tag of SYSTEM_SCAFFOLDING_TAGS) {
+    sanitized = sanitized
+      .replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}[ \\t]*>`, "gi"), " ")
+      .replace(new RegExp(`<\\/?${tag}\\b[^>]*\\/?>`, "gi"), " ");
+  }
+  return sanitized.replace(AGENT_HEADER_PATTERN, " ").replace(AGENT_IDENTITY_PATTERN, " ");
+}
+
 export function sanitizeIngestText(text: string): string {
-  return neutralizeEvidenceMarkers(stripClientWebReferenceBlocks(text)).trim();
+  return neutralizeEvidenceMarkers(stripSystemScaffolding(stripClientWebReferenceBlocks(text))).trim();
 }
 
 function sanitizeReferenceText(text: string): string {
