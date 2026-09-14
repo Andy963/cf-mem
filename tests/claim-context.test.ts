@@ -78,7 +78,7 @@ describe("loadMemoryContext semantic retrieval", () => {
     mocks.fetchWorkspaceProfileClaims.mockResolvedValue([]);
   });
 
-  it("does not re-embed D1 candidates when Vectorize returns fewer matches than the limit", async () => {
+  it("caps semantic context retrieval at five Vectorize matches", async () => {
     const ai = {
       run: vi.fn(async () => ({ data: [[1, 0]] })),
     } as unknown as Ai;
@@ -118,6 +118,14 @@ describe("loadMemoryContext semantic retrieval", () => {
     expect(ai.run).toHaveBeenCalledOnce();
     expect(mocks.fetchContextClaims).not.toHaveBeenCalled();
     expect(mocks.fetchClaimsByIds).toHaveBeenCalled();
+    expect(mocks.findVectorizedClaimMatches).toHaveBeenCalledTimes(1);
+    expect(mocks.findVectorizedClaimMatches).toHaveBeenCalledWith(
+      env,
+      expect.objectContaining({
+        topK: 5,
+        filter: { status: "active", category: "domain_fact" },
+      }),
+    );
   });
 
   it("returns project facts for a different user identity", async () => {
