@@ -3,6 +3,8 @@ import type { StoredClaimRow } from "../db/d1";
 import type { Env, Primitive, VectorizeMatch } from "../env";
 import { toQueryMatches } from "../vector/vectorize";
 
+const MAX_VECTOR_QUERY_TOP_K = 50;
+
 export function cosineSimilarity(left: number[], right: number[]): number | null {
   if (left.length === 0 || left.length !== right.length) return null;
 
@@ -80,7 +82,7 @@ export async function findVectorizedClaimMatches(
   },
 ): Promise<Array<{ id: string; score: number }>> {
   if (!env.CLAIMS_INDEX) return [];
-  const topK = Math.min(Math.max(Math.trunc(options.topK), 1), 100);
+  const topK = Math.min(Math.max(Math.trunc(options.topK), 1), MAX_VECTOR_QUERY_TOP_K);
   const baseOptions = {
     topK,
     namespace: claimNamespace(options.projectId),

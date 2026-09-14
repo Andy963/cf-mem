@@ -413,30 +413,23 @@ async function loadSemanticContextClaims(
     return [];
   }
 
-  const initialTopK = Math.min(Math.max(request.limit * 5, 20), 100);
-  const queries: Array<{ topK: number; filter?: Record<string, Primitive> }> = [{ topK: initialTopK, filter }];
-  if (initialTopK < 100) queries.push({ topK: 100, filter });
-  if (filter) queries.push({ topK: 100 });
+  const topK = Math.min(Math.max(Math.trunc(request.limit), 1), 5);
 
   const matchesById = new Map<string, SemanticContextMatch>();
-  for (const query of queries) {
-    const matches = await findVectorizedClaimMatches(env, {
-      projectId: projectScope.projectId,
-      vector: queryVector,
-      topK: query.topK,
-      filter: query.filter,
-    });
-    if (matches.length === 0) continue;
+  const matches = await findVectorizedClaimMatches(env, {
+    projectId: projectScope.projectId,
+    vector: queryVector,
+    topK,
+    filter,
+  });
+  if (matches.length === 0) return [];
 
-    const claimsById = await fetchClaimsByIds(env.DB, projectScope.projectId, matches.map((match) => match.id));
-    for (const match of matches) {
-      const claim = claimsById.get(match.id);
-      if (!claim || !accepts(claim, match.score)) continue;
-      const previous = matchesById.get(claim.id);
-      if (!previous || match.score > previous.score) matchesById.set(claim.id, { claim, score: match.score });
-    }
-
-    if (matchesById.size >= request.limit) break;
+  const claimsById = await fetchClaimsByIds(env.DB, projectScope.projectId, matches.map((match) => match.id));
+  for (const match of matches) {
+    const claim = claimsById.get(match.id);
+    if (!claim || !accepts(claim, match.score)) continue;
+    const previous = matchesById.get(claim.id);
+    if (!previous || match.score > previous.score) matchesById.set(claim.id, { claim, score: match.score });
   }
 
   return [...matchesById.values()].sort((left, right) => right.score - left.score);
