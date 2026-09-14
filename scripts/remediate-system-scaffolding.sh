@@ -59,7 +59,7 @@ scaffolding_predicate="c.status = 'active' AND c.category = 'rule' AND EXISTS (
       OR LOWER(s.text) LIKE '%# agents.md instructions%'
       OR LOWER(s.text) LIKE '%you are % (id:%'
     )
-%)"
+)"
 
 query="SELECT COUNT(*) AS candidate_count FROM memory_claims AS c WHERE ${scaffolding_predicate};"
 echo "Scanning ${database} for active rule claims backed by system scaffolding evidence..."
