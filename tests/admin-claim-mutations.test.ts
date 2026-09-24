@@ -9,15 +9,17 @@ interface BoundStatement {
   values: unknown[];
 }
 
+type TestClaimRow = StoredClaimRow & { mutation_token: string | null };
+
 class RecordingDatabase {
   readonly batches: BoundStatement[][] = [];
   readonly runCalls: BoundStatement[] = [];
   failBatchIndex: number | null = null;
   existingTag: string | null = null;
-  currentClaim: StoredClaimRow | null;
+  currentClaim: TestClaimRow | null;
   auditCount = 0;
 
-  constructor(claim: StoredClaimRow | null) {
+  constructor(claim: TestClaimRow | null) {
     this.currentClaim = claim;
   }
 
@@ -57,26 +59,27 @@ class RecordingDatabase {
   async batch(statements: Array<{ sql: string; values: unknown[] }>) {
     const bound = statements.map((statement) => ({ sql: statement.sql, values: [...statement.values] }));
     this.batches.push(bound);
-    if (this.failBatchIndex !== null && this.failBatchIndex < bound.length) {
-      throw new Error("injected batch failure");
-    }
     const guard = bound[0];
-    const expectedUpdatedAt = Number(guard.values[3]);
-    const nextUpdatedAt = Number(guard.values[0]);
-    const guardChanges = this.currentClaim && this.currentClaim.updated_at === expectedUpdatedAt ? 1 : 0;
+    const expectedToken = (guard.values[4] as string | null | undefined) ?? null;
+    const nextToken = String(guard.values[0]);
+    const nextUpdatedAt = Number(guard.values[1]);
+    const guardChanges = this.currentClaim && this.currentClaim.mutation_token === expectedToken ? 1 : 0;
     const localClaim = guardChanges === 1 && this.currentClaim
-      ? { ...this.currentClaim, updated_at: nextUpdatedAt }
+      ? { ...this.currentClaim, mutation_token: nextToken, updated_at: nextUpdatedAt }
       : this.currentClaim;
     const deletesClaim = bound.some((statement) => statement.sql.includes("DELETE FROM memory_claims"));
     const nextClaim = guardChanges === 1 && deletesClaim ? null : localClaim;
     const auditChanges = guardChanges === 1 && bound.some((statement) => statement.sql.includes("INSERT INTO memory_claim_audit_log")) ? 1 : 0;
+    if (this.failBatchIndex !== null && this.failBatchIndex < bound.length) {
+      throw new Error("injected batch failure");
+    }
     this.currentClaim = nextClaim;
     this.auditCount += auditChanges;
     return bound.map((_, index) => ({ success: true, meta: { changes: index === 0 ? guardChanges : guardChanges } }));
   }
 }
 
-function createClaim(overrides: Partial<StoredClaimRow> = {}): StoredClaimRow {
+function createClaim(overrides: Partial<TestClaimRow> = {}): TestClaimRow {
   return {
     id: "claim-1",
     project_id: "project-1",
@@ -100,6 +103,7 @@ function createClaim(overrides: Partial<StoredClaimRow> = {}): StoredClaimRow {
     last_used_at: null,
     created_at: 1,
     updated_at: 1,
+    mutation_token: null,
     ...overrides,
   };
 }
@@ -149,7 +153,7 @@ describe("admin claim atomic mutations", () => {
     expect(response.status).toBe(200);
     expect(database.batches).toHaveLength(1);
     expect(database.batches[0].map((statement) => statement.sql)).toEqual([
-      expect.stringContaining("SET updated_at = ?"),
+      expect.stringContaining("SET mutation_token = ?"),
       expect.stringContaining("UPDATE memory_claims"),
       expect.stringContaining("INSERT INTO memory_claim_audit_log"),
     ]);
@@ -186,7 +190,7 @@ describe("admin claim atomic mutations", () => {
 
     expect(response.status).toBe(200);
     expect(database.batches[0].map((statement) => statement.sql)).toEqual([
-      expect.stringContaining("SET updated_at = ?"),
+      expect.stringContaining("SET mutation_token = ?"),
       expect.stringContaining("DELETE FROM memory_claim_tags"),
       expect.stringContaining("DELETE FROM memory_evidence"),
       expect.stringContaining("INSERT INTO memory_claim_audit_log"),
@@ -224,6 +228,7 @@ describe("admin claim atomic mutations", () => {
 
   it("allows only one concurrent delete audit for the same claim", async () => {
     const database = new RecordingDatabase(createClaim());
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
     const responses = await Promise.all([
       send(database, "DELETE", "/admin/api/claims/claim-1", { reason: "first" }),
       send(database, "DELETE", "/admin/api/claims/claim-1", { reason: "retry" }),
@@ -233,6 +238,20 @@ describe("admin claim atomic mutations", () => {
     expect(database.batches).toHaveLength(2);
     expect(database.auditCount).toBe(1);
     expect(database.currentClaim).toBeNull();
+  });
+
+  it("uses unique mutation tokens for stale edits in the same millisecond", async () => {
+    const database = new RecordingDatabase(createClaim());
+    vi.spyOn(Date, "now").mockReturnValue(1_000);
+    const responses = await Promise.all([
+      send(database, "PUT", "/admin/api/claims/claim-1", { canonical_text: "First", value: { value: 1 } }),
+      send(database, "PUT", "/admin/api/claims/claim-1", { canonical_text: "Second", value: { value: 2 } }),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(database.batches).toHaveLength(2);
+    expect(database.auditCount).toBe(1);
+    expect(database.currentClaim?.mutation_token).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it("treats completed retries as no-op", async () => {

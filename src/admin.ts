@@ -74,6 +74,8 @@ interface ClaimAuditRow {
   created_at: number;
 }
 
+type MutableAdminClaimRow = StoredClaimRow & { mutation_token: string | null };
+
 interface ClaimListFilters {
   page: number;
   projectId: string | null;
@@ -138,12 +140,13 @@ function claimAuditStatement(
   before: unknown,
   after: unknown,
   mutationAt: number,
+  mutationToken: string,
 ): D1PreparedStatement {
   return env.DB.prepare(
     `INSERT INTO memory_claim_audit_log (id, project_id, claim_id, action, actor_email, reason, before_json, after_json, created_at)
      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
      WHERE EXISTS (
-       SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND updated_at = ?
+       SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?
      )`,
   ).bind(
     `claim_audit_${crypto.randomUUID()}`,
@@ -157,33 +160,29 @@ function claimAuditStatement(
     mutationAt,
     claim.id,
     claim.project_id,
-    mutationAt,
+    mutationToken,
   );
 }
 
 function claimMutationGuardStatement(
   env: Env,
-  claim: Pick<StoredClaimRow, "id" | "project_id" | "updated_at">,
+  claim: Pick<MutableAdminClaimRow, "id" | "project_id" | "mutation_token">,
   mutationAt: number,
+  mutationToken: string,
 ): D1PreparedStatement {
   return env.DB.prepare(
-    "UPDATE memory_claims SET updated_at = ? WHERE id = ? AND project_id = ? AND updated_at = ?",
-  ).bind(mutationAt, claim.id, claim.project_id, claim.updated_at);
+    "UPDATE memory_claims SET mutation_token = ?, updated_at = ? WHERE id = ? AND project_id = ? AND mutation_token IS ?",
+  ).bind(mutationToken, mutationAt, claim.id, claim.project_id, claim.mutation_token);
 }
 
-function nextMutationAt(claim: Pick<StoredClaimRow, "updated_at">): number {
-  const now = Date.now();
-  return now === claim.updated_at ? claim.updated_at + 1 : now;
-}
-
-async function findAdminClaim(env: Env, claimId: string): Promise<StoredClaimRow | null> {
+async function findAdminClaim(env: Env, claimId: string): Promise<MutableAdminClaimRow | null> {
   return env.DB.prepare(
-    `SELECT id, project_id, scope_kind, scope_id, category, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, use_count, last_used_at, created_at, updated_at
+    `SELECT id, project_id, scope_kind, scope_id, category, type, subject, memory_key, value_json, canonical_text, status, provenance, confidence, valid_from, valid_until, superseded_by, applicability, workspace_id, use_count, last_used_at, created_at, updated_at, mutation_token
      FROM memory_claims WHERE id = ?`,
-  ).bind(claimId).first<StoredClaimRow>();
+  ).bind(claimId).first<MutableAdminClaimRow>();
 }
 
-async function requireAdminClaim(env: Env, claimId: string): Promise<StoredClaimRow> {
+async function requireAdminClaim(env: Env, claimId: string): Promise<MutableAdminClaimRow> {
   const claim = await findAdminClaim(env, claimId);
   if (!claim) throw new Error("Claim not found");
   return claim;
@@ -208,15 +207,16 @@ async function updateAdminClaim(env: Env, request: Request, claimId: string, bod
   const reason = optionalReason(input.reason);
   const claim = await requireAdminClaim(env, claimId);
   const before = claimAuditSnapshot(claim);
-  const now = nextMutationAt(claim);
+  const mutationAt = Date.now();
+  const mutationToken = crypto.randomUUID();
   const normalizedText = canonicalText.trim();
   if (claim.canonical_text === normalizedText && claim.value_json === valueJson) return;
-  const after = { ...before, canonical_text: normalizedText, value_json: valueJson, updated_at: now };
+  const after = { ...before, canonical_text: normalizedText, value_json: valueJson, updated_at: mutationAt };
   const results = await env.DB.batch([
-    claimMutationGuardStatement(env, claim, now),
-    env.DB.prepare("UPDATE memory_claims SET canonical_text = ?, value_json = ? WHERE id = ? AND project_id = ? AND updated_at = ?")
-      .bind(normalizedText, valueJson, claim.id, claim.project_id, now),
-    claimAuditStatement(env, claim, request, "edit", reason, before, after, now),
+    claimMutationGuardStatement(env, claim, mutationAt, mutationToken),
+    env.DB.prepare("UPDATE memory_claims SET canonical_text = ?, value_json = ? WHERE id = ? AND project_id = ? AND mutation_token = ?")
+      .bind(normalizedText, valueJson, claim.id, claim.project_id, mutationToken),
+    claimAuditStatement(env, claim, request, "edit", reason, before, after, mutationAt, mutationToken),
   ]);
   if (results[0].meta.changes === 0) return;
 }
@@ -227,13 +227,14 @@ async function retractAdminClaim(env: Env, request: Request, claimId: string, bo
   const claim = await requireAdminClaim(env, claimId);
   if (claim.status === "retracted") return;
   const before = claimAuditSnapshot(claim);
-  const now = nextMutationAt(claim);
-  const after = { ...before, status: "retracted", valid_until: claim.valid_until ?? now, updated_at: now };
+  const mutationAt = Date.now();
+  const mutationToken = crypto.randomUUID();
+  const after = { ...before, status: "retracted", valid_until: claim.valid_until ?? mutationAt, updated_at: mutationAt };
   const results = await env.DB.batch([
-    claimMutationGuardStatement(env, claim, now),
-    env.DB.prepare("UPDATE memory_claims SET status = 'retracted', valid_until = COALESCE(valid_until, ?), updated_at = ? WHERE id = ? AND project_id = ? AND updated_at = ?")
-      .bind(now, now, claim.id, claim.project_id, now),
-    claimAuditStatement(env, claim, request, "retract", reason, before, after, now),
+    claimMutationGuardStatement(env, claim, mutationAt, mutationToken),
+    env.DB.prepare("UPDATE memory_claims SET status = 'retracted', valid_until = COALESCE(valid_until, ?) WHERE id = ? AND project_id = ? AND mutation_token = ?")
+      .bind(mutationAt, claim.id, claim.project_id, mutationToken),
+    claimAuditStatement(env, claim, request, "retract", reason, before, after, mutationAt, mutationToken),
   ]);
   if (results[0].meta.changes === 0) return;
 }
@@ -245,22 +246,23 @@ async function deleteAdminClaim(env: Env, request: Request, claimId: string, bod
   const claim = await findAdminClaim(env, claimId);
   if (!claim) return;
   const before = claimAuditSnapshot(claim);
-  const now = nextMutationAt(claim);
+  const mutationAt = Date.now();
+  const mutationToken = crypto.randomUUID();
   const results = await env.DB.batch([
-    claimMutationGuardStatement(env, claim, now),
+    claimMutationGuardStatement(env, claim, mutationAt, mutationToken),
     env.DB.prepare(`DELETE FROM memory_claim_tags
                     WHERE project_id = ? AND claim_id = ?
-                      AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND updated_at = ?)`)
-      .bind(claim.project_id, claim.id, claim.id, claim.project_id, now),
+                      AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
+      .bind(claim.project_id, claim.id, claim.id, claim.project_id, mutationToken),
     env.DB.prepare(`DELETE FROM memory_evidence
                     WHERE project_id = ? AND claim_id = ?
-                      AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND updated_at = ?)`)
-      .bind(claim.project_id, claim.id, claim.id, claim.project_id, now),
-    claimAuditStatement(env, claim, request, "delete", reason, before, null, now),
+                      AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
+      .bind(claim.project_id, claim.id, claim.id, claim.project_id, mutationToken),
+    claimAuditStatement(env, claim, request, "delete", reason, before, null, mutationAt, mutationToken),
     env.DB.prepare(`DELETE FROM memory_claims
                     WHERE project_id = ? AND id = ?
-                      AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND updated_at = ?)`)
-      .bind(claim.project_id, claim.id, claim.id, claim.project_id, now),
+                      AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
+      .bind(claim.project_id, claim.id, claim.id, claim.project_id, mutationToken),
   ]);
   if (results[0].meta.changes === 0) return;
 }
@@ -272,26 +274,28 @@ async function mutateAdminTag(env: Env, request: Request, claimId: string, tag: 
   const existing = await env.DB.prepare("SELECT tag FROM memory_claim_tags WHERE project_id = ? AND claim_id = ? AND tag = ?")
     .bind(claim.project_id, claim.id, tag).first<{ tag: string }>();
   if (add && !existing) {
-    const now = nextMutationAt(claim);
+    const mutationAt = Date.now();
+    const mutationToken = crypto.randomUUID();
     const results = await env.DB.batch([
-      claimMutationGuardStatement(env, claim, now),
+      claimMutationGuardStatement(env, claim, mutationAt, mutationToken),
       env.DB.prepare(`INSERT INTO memory_claim_tags (project_id, claim_id, tag, created_at)
                       SELECT ?, ?, ?, ?
-                      WHERE EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND updated_at = ?)`)
-        .bind(claim.project_id, claim.id, tag, now, claim.id, claim.project_id, now),
-      claimAuditStatement(env, claim, request, "tag_add", reason, null, { tag }, now),
+                      WHERE EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
+        .bind(claim.project_id, claim.id, tag, mutationAt, claim.id, claim.project_id, mutationToken),
+      claimAuditStatement(env, claim, request, "tag_add", reason, null, { tag }, mutationAt, mutationToken),
     ]);
     if (results[0].meta.changes === 0) return;
   }
   if (!add && existing) {
-    const now = nextMutationAt(claim);
+    const mutationAt = Date.now();
+    const mutationToken = crypto.randomUUID();
     const results = await env.DB.batch([
-      claimMutationGuardStatement(env, claim, now),
+      claimMutationGuardStatement(env, claim, mutationAt, mutationToken),
       env.DB.prepare(`DELETE FROM memory_claim_tags
                       WHERE project_id = ? AND claim_id = ? AND tag = ?
-                        AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND updated_at = ?)`)
-        .bind(claim.project_id, claim.id, tag, claim.id, claim.project_id, now),
-      claimAuditStatement(env, claim, request, "tag_remove", reason, { tag }, null, now),
+                        AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
+        .bind(claim.project_id, claim.id, tag, claim.id, claim.project_id, mutationToken),
+      claimAuditStatement(env, claim, request, "tag_remove", reason, { tag }, null, mutationAt, mutationToken),
     ]);
     if (results[0].meta.changes === 0) return;
   }

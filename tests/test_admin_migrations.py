@@ -13,6 +13,9 @@ class AdminAuditMigrationTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         self.addCleanup(connection.close)
         connection.executescript(
+            (MIGRATIONS / "0003_durable_memory.sql").read_text(encoding="utf-8")
+        )
+        connection.executescript(
             (MIGRATIONS / "0011_admin_claim_management.sql").read_text(encoding="utf-8")
         )
         connection.execute(
@@ -65,6 +68,10 @@ class AdminAuditMigrationTests(unittest.TestCase):
             ("project-1", "claim-1"),
         ).fetchall()
         self.assertEqual(rows, [("edit",), ("delete",)])
+        mutation_token = connection.execute(
+            "SELECT mutation_token FROM memory_claims LIMIT 1"
+        ).fetchone()
+        self.assertIsNone(mutation_token)
 
 
 if __name__ == "__main__":

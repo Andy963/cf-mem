@@ -1,3 +1,5 @@
+ALTER TABLE memory_claims ADD COLUMN mutation_token TEXT;
+
 CREATE TABLE memory_claim_audit_log_v2 (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL,
