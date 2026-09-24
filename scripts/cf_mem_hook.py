@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -37,7 +38,8 @@ _STATE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 _STATE_MAX_SESSIONS = 512
 _REFRESH_TURN_THRESHOLD = 32
 _REFRESH_TOKEN_THRESHOLD = 256_000
-_DEFAULT_PROJECT_ID = "personal"
+_LEGACY_PROJECT_ID = "personal"
+_PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,32}$")
 # Drop only bare acknowledgements. A character bar cannot separate signal from
 # noise across languages -- "结论：迁移必须先在 local D1 验证再上生产。" is a durable
 # fact in 26 characters while an English acknowledgement runs to 29 -- and the
@@ -102,16 +104,55 @@ def _load_config(raw_path: str | None = None) -> dict[str, str]:
     return {"base_url": base_url, "token": token, "owner_id": owner_id, "project_id": project_id}
 
 
-def _resolve_project_id(config: dict[str, str]) -> str:
-    project_id = config.get("project_id", "").strip()
-    if project_id:
-        return project_id
-    return os.getenv("CF_MEM_PROJECT_ID", "").strip() or _DEFAULT_PROJECT_ID
+def _validate_project_id(project_id: str) -> str | None:
+    normalized = project_id.strip()
+    if not normalized or normalized == _LEGACY_PROJECT_ID:
+        return None
+    return normalized if _PROJECT_ID_PATTERN.fullmatch(normalized) else None
+
+
+def _project_id_from_workspace(workspace_path: str) -> str | None:
+    try:
+        workspace = Path(workspace_path).expanduser().resolve()
+        result = subprocess.run(
+            ["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        common_dir = Path(result.stdout.strip()).expanduser().resolve()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+    if common_dir.name == ".git":
+        repository_root = common_dir.parent
+    elif common_dir.name.endswith(".git"):
+        repository_root = Path(str(common_dir)[: -len(".git")])
+    else:
+        repository_root = common_dir
+    return _validate_project_id(repository_root.name)
+
+
+def _resolve_project_id(config: dict[str, str], workspace_path: str | None) -> str | None:
+    configured = config.get("project_id", "").strip()
+    if configured and configured != _LEGACY_PROJECT_ID:
+        return _validate_project_id(configured)
+
+    environment = os.getenv("CF_MEM_PROJECT_ID", "").strip()
+    if environment and environment != _LEGACY_PROJECT_ID:
+        return _validate_project_id(environment)
+
+    if not workspace_path:
+        return None
+    return _project_id_from_workspace(workspace_path)
 
 
 def _resolve_workspace_info(value: str | None) -> tuple[str, str] | None:
     try:
-        current = Path(value).expanduser().resolve() if value and value.strip() else Path.cwd().resolve()
+        if not value or not value.strip():
+            return None
+        current = Path(value).expanduser().resolve()
         root = None
         for candidate in (current, *current.parents):
             if (
@@ -181,9 +222,13 @@ def _extract_event_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _extract_workspace_info(payload: dict[str, Any]) -> tuple[str, str] | None:
+def _extract_workspace_path(payload: dict[str, Any]) -> str | None:
     path = payload.get("workspace_root") or payload.get("cwd")
-    return _resolve_workspace_info(str(path) if path else None)
+    return str(path) if isinstance(path, str) and path.strip() else None
+
+
+def _extract_workspace_info(payload: dict[str, Any]) -> tuple[str, str] | None:
+    return _resolve_workspace_info(_extract_workspace_path(payload))
 
 
 def _state_key(payload: dict[str, Any], source_app: str, workspace_info: tuple[str, str] | None) -> str:
@@ -345,6 +390,7 @@ def _context_response(
 def _request_context(
     config: dict[str, str],
     workspace_info: tuple[str, str] | None,
+    project_id: str,
 ) -> dict[str, Any]:
     params: dict[str, str] = {
         "user_id": config["owner_id"],
@@ -354,7 +400,6 @@ def _request_context(
     if workspace_info:
         params["workspace_id"] = workspace_info[0]
     query = urlencode(params)
-    project_id = _resolve_project_id(config)
     return _http_get(f"{config['base_url']}/context?{query}", config["token"], project_id)
 
 
@@ -411,12 +456,16 @@ def handle_capture(source_app: str, config_path: str | None = None) -> int:
         if not normalized:
             return 0
 
-        workspace_info = _extract_workspace_info(payload)
+        workspace_path = _extract_workspace_path(payload)
+        workspace_info = _resolve_workspace_info(workspace_path)
         # Count the prompt before contacting cf-mem. A temporary ingest failure
         # must not erase the local refresh obligation for this conversation.
         should_refresh = _record_prompt(payload, source_app, workspace_info, normalized)
 
         config = _load_config(config_path)
+        project_id = _resolve_project_id(config, workspace_path)
+        if not project_id:
+            return 0
         body: dict[str, Any] = {
             "text": normalized,
             "source_app": source_app,
@@ -430,7 +479,6 @@ def handle_capture(source_app: str, config_path: str | None = None) -> int:
 
         ingest_succeeded = False
         try:
-            project_id = _resolve_project_id(config)
             _http_post(f"{config['base_url']}/profile/ingest", config["token"], body, project_id)
             ingest_succeeded = True
         except Exception:
@@ -439,7 +487,7 @@ def handle_capture(source_app: str, config_path: str | None = None) -> int:
         if should_refresh:
             try:
                 _context_response(
-                    _request_context(config, workspace_info),
+                    _request_context(config, workspace_info, project_id),
                     "UserPromptSubmit",
                 )
                 if ingest_succeeded:
@@ -545,7 +593,11 @@ def handle_assistant_capture(source_app: str, config_path: str | None = None) ->
             return 0
 
         config = _load_config(config_path)
-        workspace_info = _extract_workspace_info(payload)
+        workspace_path = _extract_workspace_path(payload)
+        workspace_info = _resolve_workspace_info(workspace_path)
+        project_id = _resolve_project_id(config, workspace_path)
+        if not project_id:
+            return 0
         body: dict[str, Any] = {
             "text": normalized,
             "role": "assistant",
@@ -558,7 +610,7 @@ def handle_assistant_capture(source_app: str, config_path: str | None = None) ->
         if workspace_info:
             body["workspace_id"], body["workspace_name"] = workspace_info
 
-        _http_post(f"{config['base_url']}/profile/ingest", config["token"], body, _resolve_project_id(config))
+        _http_post(f"{config['base_url']}/profile/ingest", config["token"], body, project_id)
     except Exception:
         # Silent fail: never block the end of a turn on hook error.
         pass
@@ -569,9 +621,13 @@ def handle_context(source_app: str, config_path: str | None = None) -> int:
     try:
         payload = _read_stdin_payload()
         config = _load_config(config_path)
-        workspace_info = _extract_workspace_info(payload)
+        workspace_path = _extract_workspace_path(payload)
+        workspace_info = _resolve_workspace_info(workspace_path)
+        project_id = _resolve_project_id(config, workspace_path)
+        if not project_id:
+            return 0
 
-        res = _request_context(config, workspace_info)
+        res = _request_context(config, workspace_info, project_id)
         _reset_prompt_counter(payload, source_app, workspace_info)
         _context_response(res, "SessionStart")
     except Exception:
