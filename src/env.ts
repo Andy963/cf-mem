@@ -58,6 +58,8 @@ export interface Env {
   PROFILE_BATCH_IDLE_MS?: string;
   CORS_ALLOW_ORIGIN?: string;
   ADMIN_ALLOWED_EMAIL?: string;
+  ADMIN_ACCESS_TEAM_DOMAIN?: string;
+  ADMIN_ACCESS_AUD?: string;
 
   EMBEDDING_MODEL?: string;
   RERANK_MODEL?: string;

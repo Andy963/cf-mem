@@ -11,6 +11,7 @@ import {
 } from "./memory/profile";
 import { DASHBOARD_HTML } from "./admin/ui";
 import { cleanupOrphanSegmentVectors } from "./memory/segment-reconciliation";
+import { adminAccessConfigured, verifyAdminAccess, type AdminIdentity } from "./admin-access";
 
 interface OverviewRow {
   claims_total: number;
@@ -86,31 +87,6 @@ interface ClaimListFilters {
   search: string | null;
 }
 
-function configuredAdminEmail(env: Env): string | null {
-  const email = env.ADMIN_ALLOWED_EMAIL?.trim().toLowerCase();
-  return email || null;
-}
-
-function isAllowedAdmin(request: Request, env: Env): boolean {
-  const allowedEmail = configuredAdminEmail(env);
-  const accessEmail = request.headers.get("Cf-Access-Authenticated-User-Email")?.trim().toLowerCase();
-  return Boolean(allowedEmail && accessEmail && accessEmail === allowedEmail);
-}
-
-function adminAccessError(request: Request, env: Env): Response | null {
-  if (!configuredAdminEmail(env)) {
-    return jsonResponse(env, { error: { message: "Admin dashboard is not configured" } }, { status: 503 });
-  }
-  if (!isAllowedAdmin(request, env)) {
-    return jsonResponse(env, { error: { message: "Forbidden" } }, { status: 403 });
-  }
-  return null;
-}
-
-function adminActorEmail(request: Request): string {
-  return request.headers.get("Cf-Access-Authenticated-User-Email")!.trim().toLowerCase();
-}
-
 function requireSameOrigin(request: Request): void {
   const origin = request.headers.get("Origin");
   if (!origin || origin !== new URL(request.url).origin) throw new Error("Cross-origin admin writes are not allowed");
@@ -135,7 +111,7 @@ function claimAuditSnapshot(claim: StoredClaimRow): Record<string, unknown> {
 function claimAuditStatement(
   env: Env,
   claim: Pick<StoredClaimRow, "id" | "project_id">,
-  request: Request,
+  actorEmail: string,
   action: "edit" | "retract" | "tag_add" | "tag_remove" | "delete",
   reason: string | null,
   before: unknown,
@@ -154,7 +130,7 @@ function claimAuditStatement(
     claim.project_id,
     claim.id,
     action,
-    adminActorEmail(request),
+    actorEmail,
     reason,
     JSON.stringify(before),
     JSON.stringify(after),
@@ -189,7 +165,7 @@ async function requireAdminClaim(env: Env, claimId: string): Promise<MutableAdmi
   return claim;
 }
 
-async function updateAdminClaim(env: Env, request: Request, claimId: string, body: unknown): Promise<void> {
+async function updateAdminClaim(env: Env, actorEmail: string, claimId: string, body: unknown): Promise<void> {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Request body must be an object");
   const input = body as Record<string, unknown>;
   const canonicalText = input.canonical_text;
@@ -217,12 +193,12 @@ async function updateAdminClaim(env: Env, request: Request, claimId: string, bod
     claimMutationGuardStatement(env, claim, mutationAt, mutationToken),
     env.DB.prepare("UPDATE memory_claims SET canonical_text = ?, value_json = ? WHERE id = ? AND project_id = ? AND mutation_token = ?")
       .bind(normalizedText, valueJson, claim.id, claim.project_id, mutationToken),
-    claimAuditStatement(env, claim, request, "edit", reason, before, after, mutationAt, mutationToken),
+    claimAuditStatement(env, claim, actorEmail, "edit", reason, before, after, mutationAt, mutationToken),
   ]);
   if (results[0].meta.changes === 0) return;
 }
 
-async function retractAdminClaim(env: Env, request: Request, claimId: string, body: unknown): Promise<void> {
+async function retractAdminClaim(env: Env, actorEmail: string, claimId: string, body: unknown): Promise<void> {
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Request body must be an object");
   const reason = optionalReason((body as Record<string, unknown>).reason);
   const claim = await requireAdminClaim(env, claimId);
@@ -235,12 +211,12 @@ async function retractAdminClaim(env: Env, request: Request, claimId: string, bo
     claimMutationGuardStatement(env, claim, mutationAt, mutationToken),
     env.DB.prepare("UPDATE memory_claims SET status = 'retracted', valid_until = COALESCE(valid_until, ?) WHERE id = ? AND project_id = ? AND mutation_token = ?")
       .bind(mutationAt, claim.id, claim.project_id, mutationToken),
-    claimAuditStatement(env, claim, request, "retract", reason, before, after, mutationAt, mutationToken),
+    claimAuditStatement(env, claim, actorEmail, "retract", reason, before, after, mutationAt, mutationToken),
   ]);
   if (results[0].meta.changes === 0) return;
 }
 
-async function deleteAdminClaim(env: Env, request: Request, claimId: string, body: unknown): Promise<void> {
+async function deleteAdminClaim(env: Env, actorEmail: string, claimId: string, body: unknown): Promise<void> {
   const reason = body && typeof body === "object" && !Array.isArray(body)
     ? optionalReason((body as Record<string, unknown>).reason)
     : null;
@@ -259,7 +235,7 @@ async function deleteAdminClaim(env: Env, request: Request, claimId: string, bod
                     WHERE project_id = ? AND claim_id = ?
                       AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
       .bind(claim.project_id, claim.id, claim.id, claim.project_id, mutationToken),
-    claimAuditStatement(env, claim, request, "delete", reason, before, null, mutationAt, mutationToken),
+    claimAuditStatement(env, claim, actorEmail, "delete", reason, before, null, mutationAt, mutationToken),
     env.DB.prepare(`DELETE FROM memory_claims
                     WHERE project_id = ? AND id = ?
                       AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
@@ -268,7 +244,7 @@ async function deleteAdminClaim(env: Env, request: Request, claimId: string, bod
   if (results[0].meta.changes === 0) return;
 }
 
-async function mutateAdminTag(env: Env, request: Request, claimId: string, tag: string, add: boolean, body: unknown): Promise<void> {
+async function mutateAdminTag(env: Env, actorEmail: string, claimId: string, tag: string, add: boolean, body: unknown): Promise<void> {
   if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(tag)) throw new Error("tag must use lowercase letters, numbers, hyphens, or underscores");
   const reason = body && typeof body === "object" && !Array.isArray(body) ? optionalReason((body as Record<string, unknown>).reason) : null;
   const claim = await requireAdminClaim(env, claimId);
@@ -283,7 +259,7 @@ async function mutateAdminTag(env: Env, request: Request, claimId: string, tag: 
                       SELECT ?, ?, ?, ?
                       WHERE EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
         .bind(claim.project_id, claim.id, tag, mutationAt, claim.id, claim.project_id, mutationToken),
-      claimAuditStatement(env, claim, request, "tag_add", reason, null, { tag }, mutationAt, mutationToken),
+      claimAuditStatement(env, claim, actorEmail, "tag_add", reason, null, { tag }, mutationAt, mutationToken),
     ]);
     if (results[0].meta.changes === 0) return;
   }
@@ -296,7 +272,7 @@ async function mutateAdminTag(env: Env, request: Request, claimId: string, tag: 
                       WHERE project_id = ? AND claim_id = ? AND tag = ?
                         AND EXISTS (SELECT 1 FROM memory_claims WHERE id = ? AND project_id = ? AND mutation_token = ?)`)
         .bind(claim.project_id, claim.id, tag, claim.id, claim.project_id, mutationToken),
-      claimAuditStatement(env, claim, request, "tag_remove", reason, { tag }, null, mutationAt, mutationToken),
+      claimAuditStatement(env, claim, actorEmail, "tag_remove", reason, { tag }, null, mutationAt, mutationToken),
     ]);
     if (results[0].meta.changes === 0) return;
   }
@@ -467,8 +443,11 @@ function dashboardResponse(): Response {
 export async function handleAdminRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const method = request.method.toUpperCase();
-  const accessError = adminAccessError(request, env);
-  if (accessError) return accessError;
+  if (!adminAccessConfigured(env)) {
+    return jsonResponse(env, { error: { message: "Admin dashboard is not configured" } }, { status: 503 });
+  }
+  const admin = await verifyAdminAccess(request, env) as AdminIdentity;
+  if (!admin) return jsonResponse(env, { error: { message: "Forbidden" } }, { status: 403 });
 
   if (method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
     return dashboardResponse();
@@ -503,20 +482,20 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
     try {
       requireSameOrigin(request);
       const body = await parseJson(request);
-      if (method === "PUT" && !detailMatch[2]) await updateAdminClaim(env, request, claimId, body);
+      if (method === "PUT" && !detailMatch[2]) await updateAdminClaim(env, admin.email, claimId, body);
       else if (method === "DELETE" && !detailMatch[2]) {
-        await deleteAdminClaim(env, request, claimId, body);
+        await deleteAdminClaim(env, admin.email, claimId, body);
         return jsonResponse(env, { ok: true, deleted: true }, { headers: { "Cache-Control": "no-store" } });
       }
-      else if (method === "POST" && detailMatch[2] === "retract") await retractAdminClaim(env, request, claimId, body);
+      else if (method === "POST" && detailMatch[2] === "retract") await retractAdminClaim(env, admin.email, claimId, body);
       else if (method === "POST" && detailMatch[2] === "tags") {
         const tag = body && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>).tag : null;
         if (typeof tag !== "string") {
           throw new Error("tag is required");
         }
-        await mutateAdminTag(env, request, claimId, tag, true, body);
+        await mutateAdminTag(env, admin.email, claimId, tag, true, body);
       } else if (method === "DELETE" && detailMatch[2] === "tags" && detailMatch[3]) {
-        await mutateAdminTag(env, request, claimId, decodeURIComponent(detailMatch[3]), false, body);
+        await mutateAdminTag(env, admin.email, claimId, decodeURIComponent(detailMatch[3]), false, body);
       } else return textResponse(env, "Method Not Allowed", { status: 405 });
       const detail = await getAdminClaimDetail(env, claimId);
       return detail ? jsonResponse(env, { ok: true, ...detail }) : jsonResponse(env, { error: { message: "Claim not found" } }, { status: 404 });
@@ -580,7 +559,7 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       if (!verifier) throw new Error("verifier_instructions must not be empty");
       if (extractor.length > 20_000) throw new Error("extractor_instructions is too long (max 20000 characters)");
       if (verifier.length > 20_000) throw new Error("verifier_instructions is too long (max 20000 characters)");
-      await savePromptConfig(env, extractor, verifier, adminActorEmail(request));
+      await savePromptConfig(env, extractor, verifier, admin.email);
       return jsonResponse(env, { ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to save prompt configuration";

@@ -1,5 +1,6 @@
 import type { D1Database } from "@cloudflare/workers-types";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { exportJWK, generateKeyPair, SignJWT, type CryptoKey, type JWK } from "jose";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleAdminRequest } from "../src/admin";
 import type { StoredClaimRow } from "../src/db/d1";
 import type { Env } from "../src/env";
@@ -11,6 +12,12 @@ interface BoundStatement {
 
 type TestClaimRow = StoredClaimRow & { mutation_token: string | null };
 
+const ACCESS_TEAM_DOMAIN = "https://test-team.cloudflareaccess.com";
+const ACCESS_AUDIENCE = "test-access-audience";
+
+let accessPrivateKey: CryptoKey;
+let accessJwk: JWK;
+
 class RecordingDatabase {
   readonly batches: BoundStatement[][] = [];
   readonly runCalls: BoundStatement[] = [];
@@ -18,9 +25,18 @@ class RecordingDatabase {
   existingTag: string | null = null;
   currentClaim: TestClaimRow | null;
   auditCount = 0;
+  claimReadBarrier: { remaining: number; ready: Promise<void>; release: () => void } | null = null;
 
   constructor(claim: TestClaimRow | null) {
     this.currentClaim = claim;
+  }
+
+  synchronizeNextClaimReads(count: number): void {
+    let release = () => undefined;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.claimReadBarrier = { remaining: count, ready, release };
   }
 
   prepare(sql: string) {
@@ -34,7 +50,18 @@ class RecordingDatabase {
       },
       async first<T>() {
         if (sql.includes("FROM memory_claims")) {
-          return ((statement as { database?: RecordingDatabase }).database?.currentClaim as T | undefined) ?? null;
+          const database = (statement as { database?: RecordingDatabase }).database;
+          const snapshot = database?.currentClaim as T | undefined;
+          const barrier = database?.claimReadBarrier;
+          if (barrier) {
+            barrier.remaining -= 1;
+            if (barrier.remaining === 0) {
+              database.claimReadBarrier = null;
+              barrier.release();
+            }
+            await barrier.ready;
+          }
+          return snapshot ?? null;
         }
         if (sql.includes("SELECT tag FROM memory_claim_tags")) {
           const database = (statement as { database?: RecordingDatabase }).database;
@@ -113,13 +140,23 @@ function createEnvironment(database: RecordingDatabase): Env {
     DB: database as unknown as D1Database,
     SEGMENTS_INDEX: {} as Env["SEGMENTS_INDEX"],
     ADMIN_ALLOWED_EMAIL: "admin@example.com",
+    ADMIN_ACCESS_TEAM_DOMAIN: ACCESS_TEAM_DOMAIN,
+    ADMIN_ACCESS_AUD: ACCESS_AUDIENCE,
   };
 }
 
-function createRequest(method: string, path: string, body?: unknown): Request {
+async function createRequest(method: string, path: string, body?: unknown): Promise<Request> {
+  const token = await new SignJWT({ email: "admin@example.com" })
+    .setProtectedHeader({ alg: "RS256", kid: accessJwk.kid })
+    .setIssuer(ACCESS_TEAM_DOMAIN)
+    .setAudience(ACCESS_AUDIENCE)
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(accessPrivateKey);
   return new Request(`https://cf-mem.test${path}`, {
     method,
     headers: {
+      "Cf-Access-Jwt-Assertion": token,
       "Cf-Access-Authenticated-User-Email": "admin@example.com",
       Origin: "https://cf-mem.test",
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
@@ -134,10 +171,27 @@ async function send(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  return handleAdminRequest(createRequest(method, path, body), createEnvironment(database));
+  return handleAdminRequest(await createRequest(method, path, body), createEnvironment(database));
 }
 
+beforeAll(async () => {
+  const keyPair = await generateKeyPair("RS256");
+  accessPrivateKey = keyPair.privateKey;
+  accessJwk = await exportJWK(keyPair.publicKey);
+  accessJwk.kid = "test-access-key";
+  accessJwk.alg = "RS256";
+  accessJwk.use = "sig";
+});
+
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ keys: [accessJwk] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  })));
+});
+
 afterEach(() => {
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -228,6 +282,7 @@ describe("admin claim atomic mutations", () => {
 
   it("allows only one concurrent delete audit for the same claim", async () => {
     const database = new RecordingDatabase(createClaim());
+    database.synchronizeNextClaimReads(2);
     vi.spyOn(Date, "now").mockReturnValue(1_000);
     const responses = await Promise.all([
       send(database, "DELETE", "/admin/api/claims/claim-1", { reason: "first" }),
@@ -242,6 +297,7 @@ describe("admin claim atomic mutations", () => {
 
   it("uses unique mutation tokens for stale edits in the same millisecond", async () => {
     const database = new RecordingDatabase(createClaim());
+    database.synchronizeNextClaimReads(2);
     vi.spyOn(Date, "now").mockReturnValue(1_000);
     const responses = await Promise.all([
       send(database, "PUT", "/admin/api/claims/claim-1", { canonical_text: "First", value: { value: 1 } }),
