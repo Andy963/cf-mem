@@ -129,6 +129,8 @@ npx wrangler secret put PROJECT_TOKENS_JSON
 | `RAW_MEMORY_MAX_BYTES_PER_PROJECT` | `104857600` | 每个项目的原始记忆逻辑字节上限 |
 | `RAW_MEMORY_TARGET_BYTES_PER_PROJECT` | `83886080` | 超过上限后清理到的目标水位 |
 | `ADMIN_ALLOWED_EMAIL` | 无 | Cloudflare Access 管理员邮箱，小写比较 |
+| `ADMIN_ACCESS_TEAM_DOMAIN` | 无 | Cloudflare Access team domain，例如 `https://team.cloudflareaccess.com` |
+| `ADMIN_ACCESS_AUD` | 无 | Access Application AUD tag；Admin 启用时必填 |
 | `EXTRACTOR_LLM_API_BASE` | 无 | 个人记忆抽取器的 OpenAI 兼容接口地址 |
 | `EXTRACTOR_LLM_MODEL` | 无 | 个人记忆抽取、验证和对齐使用的模型 |
 | `PROFILE_EXTRACTOR_PROTOCOL` | `chat_completions` | 抽取器协议，也支持 `responses` |
@@ -206,9 +208,13 @@ Worker 会从 D1 重新嵌入同一语义 scope 中尚未出现在向量结果�
 ```toml
 [vars]
 ADMIN_ALLOWED_EMAIL = "admin@example.com"
+ADMIN_ACCESS_TEAM_DOMAIN = "https://team.cloudflareaccess.com"
+ADMIN_ACCESS_AUD = "your-application-aud-tag"
 ```
 
-生产环境建议设置 `workers_dev = false`，只通过受 Access 保护的自定义域名访问后台。
+生产环境必须设置 `workers_dev = false` 和 `preview_urls = false`，并只通过受 Access 保护的
+自定义域名访问后台。Worker 会验证 `Cf-Access-Jwt-Assertion` 的签名、issuer、audience、过期时间
+和 email claim；只提供 `Cf-Access-Authenticated-User-Email` 不会通过鉴权。
 后台写操作会记录操作人、时间、原因和修改前后快照。
 
 ## 原始记忆保留与清理

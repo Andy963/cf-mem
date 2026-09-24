@@ -107,7 +107,7 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" \
 | 记忆自动提炼 | `PERSONAL_MEMORY_OWNER_ID`、模型接口配置；鉴权使用共享 token |
 | 网页搜索和抓取 | `TAVILY_API_TOKEN`、`TAVILY_BASE_URL` |
 | 搜索精排 | `RERANK_DEFAULT_ENABLED`，或请求中的 `rerank.enabled` |
-| 管理后台 | Cloudflare Access、`ADMIN_ALLOWED_EMAIL` |
+| 管理后台 | 受 Cloudflare Access 保护的自定义域名、`ADMIN_ALLOWED_EMAIL`、`ADMIN_ACCESS_TEAM_DOMAIN`、`ADMIN_ACCESS_AUD` |
 | 语义去重 | 默认已启用；需要 `cf-claims` 及其 metadata index |
 
 完整配置表、默认值和 secret 用法见
@@ -241,7 +241,9 @@ Nudge 处理带前缀的 `session_id` 时按实际分隔符提取外部 Session 
 不会因此增加 Job 或原始段落的失败计数。
 语义去重灰区中的 LLM 裁决也使用同一个断路器，上游故障时会快速跳过裁决并保留未合并 Claim。
 断路器状态暂时无法从 D1 读取时按关闭处理，优先保证请求继续执行；D1 恢复后才会继续记录断路状态。
-生产环境建议使用自定义域名，并将 `workers_dev = false`，尤其是启用管理后台时。
+启用管理后台前，必须先用 Cloudflare Access 保护自定义域名上的 `/admin*`，并保持
+`workers_dev = false`、`preview_urls = false`。Worker 会验证 Cloudflare Access JWT 的签名、
+issuer、audience 和 email claim；单独伪造 email header 不再能通过鉴权。
 
 ## 升级
 

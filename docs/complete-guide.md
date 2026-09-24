@@ -150,13 +150,13 @@ original claim is never physically deleted. It never exposes API tokens.
 
 Protect both `mem.example.com/admin*` and `mem.example.com/admin/api/*` with one Cloudflare Access
 Application. Configure the Access policy to allow the administrator's email, then set the same
-lowercase email as `ADMIN_ALLOWED_EMAIL` in `[vars]`. Access injects
-`Cf-Access-Authenticated-User-Email`; the Worker verifies it against that value before rendering
-the page or returning metrics.
+lowercase email as `ADMIN_ALLOWED_EMAIL` in `[vars]`. Access injects a signed
+`Cf-Access-Jwt-Assertion`; the Worker verifies its signature, issuer, audience, expiry, and email
+claim before rendering the page or returning metrics. `ADMIN_ACCESS_TEAM_DOMAIN` and
+`ADMIN_ACCESS_AUD` are required and pin the expected Access team and application.
 
-For production, use a custom-domain route and set `workers_dev = false`. Otherwise the same Worker
-may also be available under a `workers.dev` address, which is outside the custom-domain Access
-policy and could allow a forged header to bypass the Worker-level email check.
+For production, use an Access-protected custom-domain route and set both `workers_dev = false` and
+`preview_urls = false`. This keeps alternate public endpoints from bypassing the Access boundary.
 
 ## 配置项
 

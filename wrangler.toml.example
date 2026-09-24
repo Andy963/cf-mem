@@ -1,8 +1,8 @@
 name = "cf-mem"
 main = "src/index.ts"
 compatibility_date = "2026-03-03"
-workers_dev = true
-preview_urls = true
+workers_dev = false
+preview_urls = false
 
 [ai]
 binding = "AI"
@@ -31,10 +31,12 @@ CORS_ALLOW_ORIGIN = "*"
 # Deprecated migration guard for legacy project credentials. It is ignored for
 # shared MEMORY_API_TOKEN requests; leave unset for dynamic project routing.
 # ALLOWED_MEMORY_PROJECTS = "personal,whisper,ads,cf-mem,study_copilot"
-# The /admin dashboard requires Cloudflare Access plus this allowed email.
-# Set workers_dev = false in production so the dashboard cannot bypass Access
-# through the worker's workers.dev address.
+# The /admin dashboard requires a custom domain protected by Cloudflare Access.
+# The Worker validates the Access JWT and then matches its email claim.
 # ADMIN_ALLOWED_EMAIL = "you@example.com"
+# Required pins for the Access application and team.
+# ADMIN_ACCESS_TEAM_DOMAIN = "https://your-team.cloudflareaccess.com"
+# ADMIN_ACCESS_AUD = "your-application-aud-tag"
 EMBEDDING_MODEL = "@cf/baai/bge-m3"
 RERANK_MODEL = "@cf/baai/bge-reranker-base"
 # Optional: set to true to enable rerank by default for /memory/search.
