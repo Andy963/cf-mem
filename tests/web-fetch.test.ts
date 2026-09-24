@@ -96,4 +96,125 @@ describe("fetchPages", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps pathnames that differ only by case distinct", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        results: [
+          { url: "https://example.com/Guide", raw_content: "Uppercase guide" },
+          { url: "https://example.com/guide", raw_content: "Lowercase guide" },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchPages(makeEnv({
+      TAVILY_API_TOKEN: "relay-token",
+      TAVILY_BASE_URL: "https://relay.example.com",
+    }), ["https://example.com/Guide", "https://example.com/guide"])).resolves.toMatchObject([
+      { url: "https://example.com/Guide", text: "Uppercase guide" },
+      { url: "https://example.com/guide", text: "Lowercase guide" },
+    ]);
+  });
+
+  it("matches scheme and host casing while normalizing default ports", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        results: [{ url: "HTTPS://EXAMPLE.COM:443/article", raw_content: "Article text" }],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchPages(makeEnv({
+      TAVILY_API_TOKEN: "relay-token",
+      TAVILY_BASE_URL: "https://relay.example.com",
+    }), ["https://example.com/article"])).resolves.toMatchObject([
+      {
+        url: "https://example.com/article",
+        final_url: "HTTPS://EXAMPLE.COM:443/article",
+        text: "Article text",
+      },
+    ]);
+  });
+
+  it("deduplicates equivalent requested URLs deterministically", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        results: [{ url: "https://example.com/article", raw_content: "Article text" }],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchPages(makeEnv({
+      TAVILY_API_TOKEN: "relay-token",
+      TAVILY_BASE_URL: "https://relay.example.com",
+    }), ["https://example.com/article", "HTTPS://EXAMPLE.COM:443/article"])).resolves.toMatchObject([
+      { url: "https://example.com/article", text: "Article text" },
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      urls: ["https://example.com/article"],
+    });
+  });
+
+  it("deduplicates requested URLs that differ only by fragment", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        results: [{ url: "https://example.com/article#summary", raw_content: "Article text" }],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchPages(makeEnv({
+      TAVILY_API_TOKEN: "relay-token",
+      TAVILY_BASE_URL: "https://relay.example.com",
+    }), ["https://example.com/article#one", "https://example.com/article#two"])).resolves.toMatchObject([
+      { url: "https://example.com/article#one", text: "Article text" },
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      urls: ["https://example.com/article#one"],
+    });
+  });
+
+  it("ignores fragments but preserves query identity", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        results: [
+          { url: "https://example.com/article?id=1#summary", raw_content: "First result" },
+          { url: "https://example.com/article?id=2", raw_content: "Second result" },
+        ],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchPages(makeEnv({
+      TAVILY_API_TOKEN: "relay-token",
+      TAVILY_BASE_URL: "https://relay.example.com",
+    }), ["https://example.com/article?id=1", "https://example.com/article?id=2"])).resolves.toMatchObject([
+      {
+        url: "https://example.com/article?id=1",
+        final_url: "https://example.com/article?id=1#summary",
+        text: "First result",
+      },
+      {
+        url: "https://example.com/article?id=2",
+        final_url: "https://example.com/article?id=2",
+        text: "Second result",
+      },
+    ]);
+  });
 });

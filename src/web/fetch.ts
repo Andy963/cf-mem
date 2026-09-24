@@ -152,8 +152,13 @@ export function extractUrlsFromText(text: string, limit: number): string[] {
   return found;
 }
 
-function normalizedUrlKey(value: string): string {
-  return value.replace(/\/+$/, "").toLowerCase();
+function normalizedUrlKey(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${url.pathname}${url.search}`;
+  } catch {
+    return null;
+  }
 }
 
 async function tavilyExtractPages(env: Env, urls: string[]): Promise<Map<string, FetchedPage>> {
@@ -164,13 +169,18 @@ async function tavilyExtractPages(env: Env, urls: string[]): Promise<Map<string,
   const payload = await response.json().catch(() => null) as { results?: unknown } | null;
   if (!payload || !Array.isArray(payload.results)) return pages;
 
-  const byKey = new Map(urls.map((url) => [normalizedUrlKey(url), url]));
+  const byKey = new Map<string, string>();
+  for (const url of urls) {
+    const key = normalizedUrlKey(url);
+    if (key && !byKey.has(key)) byKey.set(key, url);
+  }
   const fetchedAt = Date.now();
   for (const entry of payload.results) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const record = entry as Record<string, unknown>;
     const resultUrl = typeof record.url === "string" ? record.url : "";
-    const requested = byKey.get(normalizedUrlKey(resultUrl));
+    const resultKey = normalizedUrlKey(resultUrl);
+    const requested = resultKey ? byKey.get(resultKey) : undefined;
     const text = typeof record.raw_content === "string" && record.raw_content.trim()
       ? record.raw_content.trim()
       : typeof record.content === "string" ? record.content.trim() : "";
@@ -199,11 +209,14 @@ export async function fetchPages(
   options: { maxChars?: number } = {},
 ): Promise<PageFetchResult[]> {
   const results = new Map<string, PageFetchResult>();
+  const validKeys = new Set<string>();
   const valid: string[] = [];
   for (const raw of rawUrls.slice(0, MAX_URLS_PER_FETCH)) {
     try {
       const normalized = publicHttpUrl(raw).toString();
-      if (results.has(normalized) || valid.includes(normalized)) continue;
+      const key = normalizedUrlKey(normalized);
+      if (results.has(normalized) || (key && validKeys.has(key))) continue;
+      if (key) validKeys.add(key);
       valid.push(normalized);
     } catch (error) {
       results.set(String(raw), { url: String(raw), error: (error as Error).message });
