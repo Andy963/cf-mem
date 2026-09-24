@@ -165,6 +165,28 @@ describe("fetchPages", () => {
     });
   });
 
+  it("deduplicates requested URLs that differ only by fragment", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        results: [{ url: "https://example.com/article#summary", raw_content: "Article text" }],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchPages(makeEnv({
+      TAVILY_API_TOKEN: "relay-token",
+      TAVILY_BASE_URL: "https://relay.example.com",
+    }), ["https://example.com/article#one", "https://example.com/article#two"])).resolves.toMatchObject([
+      { url: "https://example.com/article#one", text: "Article text" },
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      urls: ["https://example.com/article#one"],
+    });
+  });
+
   it("ignores fragments but preserves query identity", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({

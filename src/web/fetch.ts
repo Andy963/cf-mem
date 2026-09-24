@@ -209,11 +209,14 @@ export async function fetchPages(
   options: { maxChars?: number } = {},
 ): Promise<PageFetchResult[]> {
   const results = new Map<string, PageFetchResult>();
+  const validKeys = new Set<string>();
   const valid: string[] = [];
   for (const raw of rawUrls.slice(0, MAX_URLS_PER_FETCH)) {
     try {
       const normalized = publicHttpUrl(raw).toString();
-      if (results.has(normalized) || valid.includes(normalized)) continue;
+      const key = normalizedUrlKey(normalized);
+      if (results.has(normalized) || (key && validKeys.has(key))) continue;
+      if (key) validKeys.add(key);
       valid.push(normalized);
     } catch (error) {
       results.set(String(raw), { url: String(raw), error: (error as Error).message });
