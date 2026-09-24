@@ -97,6 +97,33 @@ export async function upsertSegments(db: D1Database, items: PreparedIndexItem[],
       db
         .prepare("DELETE FROM memory_deletion_jobs WHERE project_id = ? AND resource_type = 'segment' AND resource_id = ?")
         .bind(item.projectId, item.id),
+      db.prepare(
+        `INSERT INTO memory_segment_vector_jobs (
+          project_id, segment_id, revision, operation, segment_updated_at, status,
+          attempt_count, last_error, next_attempt_at, lease_token, lease_expires_at,
+          operation_token, created_at, updated_at
+        ) VALUES (?, ?, 1, 'upsert', ?, 'pending', 0, NULL, ?, NULL, NULL, ?, ?, ?)
+        ON CONFLICT (project_id, segment_id) DO UPDATE SET
+          revision = memory_segment_vector_jobs.revision + 1,
+          operation = 'upsert',
+          segment_updated_at = excluded.segment_updated_at,
+          status = CASE WHEN memory_segment_vector_jobs.status = 'processing' THEN 'processing' ELSE 'pending' END,
+          attempt_count = CASE WHEN memory_segment_vector_jobs.status = 'processing' THEN memory_segment_vector_jobs.attempt_count ELSE 0 END,
+          last_error = NULL,
+          next_attempt_at = excluded.next_attempt_at,
+          lease_token = CASE WHEN memory_segment_vector_jobs.status = 'processing' THEN memory_segment_vector_jobs.lease_token ELSE NULL END,
+          lease_expires_at = CASE WHEN memory_segment_vector_jobs.status = 'processing' THEN memory_segment_vector_jobs.lease_expires_at ELSE NULL END,
+          operation_token = excluded.operation_token,
+          updated_at = excluded.updated_at`,
+      ).bind(
+        item.projectId,
+        item.id,
+        now,
+        now,
+        item.vectorOperationToken ?? null,
+        now,
+        now,
+      ),
     );
   }
 

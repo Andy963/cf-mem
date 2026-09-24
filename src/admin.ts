@@ -10,6 +10,7 @@ import {
   runExtractionTest,
 } from "./memory/profile";
 import { DASHBOARD_HTML } from "./admin/ui";
+import { cleanupOrphanSegmentVectors } from "./memory/segment-reconciliation";
 
 interface OverviewRow {
   claims_total: number;
@@ -524,6 +525,18 @@ export async function handleAdminRequest(request: Request, env: Env): Promise<Re
       const status = message === "Claim not found" ? 404 : 400;
       if (status === 400) console.warn(`[admin] claim update rejected: ${message}`);
       return jsonResponse(env, { error: { message } }, { status });
+    }
+  }
+  if (method === "POST" && url.pathname === "/admin/api/vector/orphans/cleanup") {
+    try {
+      requireSameOrigin(request);
+      const body = await parseJson(request);
+      const input = body && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : {};
+      const result = await cleanupOrphanSegmentVectors(env, input.ids, input.apply === true);
+      return jsonResponse(env, { ok: true, ...result }, { headers: { "Cache-Control": "no-store" } });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Vector cleanup failed";
+      return jsonResponse(env, { error: { message } }, { status: 400 });
     }
   }
   if (method === "GET" && url.pathname.startsWith("/admin/api/claims/")) {

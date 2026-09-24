@@ -4,6 +4,7 @@ import type { Env } from "../env";
 import { chunkArray } from "../utils";
 import { rawMemoryExpiresAt } from "./retention";
 import type { PreparedIndexItem } from "./schema";
+import { completeSegmentVectorJobs, ensureLatestSegmentVectorJobs } from "./segment-reconciliation";
 
 const EMBEDDING_BATCH_SIZE = 32;
 
@@ -40,32 +41,32 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
 
   if (itemsToUpsert.length > 0) {
     for (const batch of chunkArray(itemsToUpsert, EMBEDDING_BATCH_SIZE)) {
+      const durableBatch = batch.map((item) => ({ ...item, vectorOperationToken: crypto.randomUUID() }));
       const vectors = await embedTexts(
         env,
-        batch.map((item) => item.text),
+        durableBatch.map((item) => item.text),
       );
 
       if (vectors.length !== batch.length) {
         throw new Error(`Embedding count mismatch. expected=${batch.length} actual=${vectors.length}`);
       }
 
+      await upsertSegments(env.DB, durableBatch, now, rawMemoryExpiresAt(env, now));
+
       await env.SEGMENTS_INDEX.upsert(
-        batch.map((item, index) => ({
+        durableBatch.map((item, index) => ({
           id: item.id,
           namespace: item.namespace,
           values: vectors[index],
           metadata: item.vectorMetadata,
         })),
       );
-
-      try {
-        await upsertSegments(env.DB, batch, now, rawMemoryExpiresAt(env, now));
-      } catch (error) {
-        // Vectors are written before their rows, so a D1 failure here orphans
-        // them. Search still ignores orphans (fetchByIds finds no row), but they
-        // keep consuming index quota until the same id is indexed again.
-        console.error(`[index] D1 upsert failed after writing ${batch.length} vector(s) in project ${projectId}: ${error instanceof Error ? error.message : String(error)}`);
-        throw error;
+      const completed = await completeSegmentVectorJobs(env.DB, durableBatch, now);
+      const staleItems = durableBatch.filter((item) => !completed.get(item.id));
+      if (staleItems.length > 0) {
+        await ensureLatestSegmentVectorJobs(env, staleItems);
+        if (!env.SEGMENTS_INDEX.deleteByIds) throw new Error("SEGMENTS_INDEX deletion is unavailable");
+        await env.SEGMENTS_INDEX.deleteByIds(staleItems.map((item) => item.id));
       }
     }
   }
