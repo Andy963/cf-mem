@@ -12,6 +12,8 @@ let publicJwk: JWK;
 function createEnvironment(overrides: Partial<Env> = {}): Env {
   return {
     ADMIN_ALLOWED_EMAIL: "admin@example.com",
+    ADMIN_ACCESS_TEAM_DOMAIN: ACCESS_TEAM_DOMAIN,
+    ADMIN_ACCESS_AUD: ACCESS_AUDIENCE,
     ...overrides,
   } as Env;
 }
@@ -62,7 +64,7 @@ afterEach(() => {
 });
 
 describe("Cloudflare Access admin authentication", () => {
-  it("accepts a valid Access JWT without requiring optional pinning", async () => {
+  it("accepts a valid Access JWT for the configured team and application", async () => {
     const token = await createToken();
     const response = await createAdminRequest({ token, email: "admin@example.com" });
 
@@ -102,6 +104,13 @@ describe("Cloudflare Access admin authentication", () => {
     expect(response.status).toBe(403);
   });
 
+  it("rejects a signed token from a different Access team", async () => {
+    const token = await createToken({ issuer: "https://other-team.cloudflareaccess.com" });
+    const response = await createAdminRequest({ token, email: "admin@example.com" });
+
+    expect(response.status).toBe(403);
+  });
+
   it("rejects a token whose email header was changed", async () => {
     const token = await createToken();
     const response = await createAdminRequest({ token, email: "other@example.com" });
@@ -112,6 +121,17 @@ describe("Cloudflare Access admin authentication", () => {
   it("fails closed when the configured team domain is invalid", async () => {
     const response = await createAdminRequest({
       env: createEnvironment({ ADMIN_ACCESS_TEAM_DOMAIN: "https://example.com" }),
+    });
+
+    expect(response.status).toBe(503);
+  });
+
+  it("fails closed when issuer and audience pins are missing", async () => {
+    const response = await createAdminRequest({
+      env: createEnvironment({
+        ADMIN_ACCESS_TEAM_DOMAIN: undefined,
+        ADMIN_ACCESS_AUD: undefined,
+      }),
     });
 
     expect(response.status).toBe(503);

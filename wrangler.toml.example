@@ -34,7 +34,7 @@ CORS_ALLOW_ORIGIN = "*"
 # The /admin dashboard requires a custom domain protected by Cloudflare Access.
 # The Worker validates the Access JWT and then matches its email claim.
 # ADMIN_ALLOWED_EMAIL = "you@example.com"
-# Optional defense-in-depth pins for the Access application and team.
+# Required pins for the Access application and team.
 # ADMIN_ACCESS_TEAM_DOMAIN = "https://your-team.cloudflareaccess.com"
 # ADMIN_ACCESS_AUD = "your-application-aud-tag"
 EMBEDDING_MODEL = "@cf/baai/bge-m3"

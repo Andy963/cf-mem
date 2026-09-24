@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Env } from "./env";
 
 const ACCESS_ISSUER_SUFFIX = ".cloudflareaccess.com";
@@ -38,9 +38,11 @@ function configuredAccessIssuer(env: Env): string | null {
 }
 
 export function adminAccessConfigured(env: Env): boolean {
-  if (!env.ADMIN_ALLOWED_EMAIL?.trim()) return false;
-  if (env.ADMIN_ACCESS_TEAM_DOMAIN !== undefined && !configuredAccessIssuer(env)) return false;
-  return true;
+  return Boolean(
+    env.ADMIN_ALLOWED_EMAIL?.trim()
+    && configuredAccessIssuer(env)
+    && env.ADMIN_ACCESS_AUD?.trim(),
+  );
 }
 
 function remoteJwks(issuer: string): ReturnType<typeof createRemoteJWKSet> {
@@ -59,23 +61,15 @@ function remoteJwks(issuer: string): ReturnType<typeof createRemoteJWKSet> {
 export async function verifyAdminAccess(request: Request, env: Env): Promise<AdminIdentity | null> {
   const token = request.headers.get("Cf-Access-Jwt-Assertion")?.trim();
   const allowedEmail = env.ADMIN_ALLOWED_EMAIL?.trim().toLowerCase();
-  const configuredIssuer = env.ADMIN_ACCESS_TEAM_DOMAIN === undefined
-    ? null
-    : configuredAccessIssuer(env);
-  const audience = env.ADMIN_ACCESS_AUD?.trim() || undefined;
-  if (!token || !allowedEmail || !adminAccessConfigured(env) || (env.ADMIN_ACCESS_TEAM_DOMAIN !== undefined && !configuredIssuer)) {
+  const issuer = configuredAccessIssuer(env);
+  const audience = env.ADMIN_ACCESS_AUD?.trim();
+  if (!token || !allowedEmail || !issuer || !audience) {
     return null;
   }
 
   try {
-    const unverifiedPayload = decodeJwt(token);
-    const tokenIssuer = typeof unverifiedPayload.iss === "string"
-      ? normalizedAccessIssuer(unverifiedPayload.iss)
-      : null;
-    if (!tokenIssuer || (configuredIssuer && tokenIssuer !== configuredIssuer)) return null;
-
-    const { payload } = await jwtVerify(token, remoteJwks(tokenIssuer), {
-      issuer: tokenIssuer,
+    const { payload } = await jwtVerify(token, remoteJwks(issuer), {
+      issuer,
       audience,
       algorithms: ["RS256"],
       requiredClaims: ["aud", "email", "exp", "iat", "iss"],

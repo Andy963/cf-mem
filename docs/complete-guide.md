@@ -153,7 +153,7 @@ Application. Configure the Access policy to allow the administrator's email, the
 lowercase email as `ADMIN_ALLOWED_EMAIL` in `[vars]`. Access injects a signed
 `Cf-Access-Jwt-Assertion`; the Worker verifies its signature, issuer, audience, expiry, and email
 claim before rendering the page or returning metrics. `ADMIN_ACCESS_TEAM_DOMAIN` and
-`ADMIN_ACCESS_AUD` can pin the expected Access team and application.
+`ADMIN_ACCESS_AUD` are required and pin the expected Access team and application.
 
 For production, use an Access-protected custom-domain route and set both `workers_dev = false` and
 `preview_urls = false`. This keeps alternate public endpoints from bypassing the Access boundary.

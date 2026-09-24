@@ -107,7 +107,7 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" \
 | 记忆自动提炼 | `PERSONAL_MEMORY_OWNER_ID`、模型接口配置；鉴权使用共享 token |
 | 网页搜索和抓取 | `TAVILY_API_TOKEN`、`TAVILY_BASE_URL` |
 | 搜索精排 | `RERANK_DEFAULT_ENABLED`，或请求中的 `rerank.enabled` |
-| 管理后台 | 受 Cloudflare Access 保护的自定义域名、`ADMIN_ALLOWED_EMAIL`；建议同时固定 Access team domain 和 AUD |
+| 管理后台 | 受 Cloudflare Access 保护的自定义域名、`ADMIN_ALLOWED_EMAIL`、`ADMIN_ACCESS_TEAM_DOMAIN`、`ADMIN_ACCESS_AUD` |
 | 语义去重 | 默认已启用；需要 `cf-claims` 及其 metadata index |
 
 完整配置表、默认值和 secret 用法见
