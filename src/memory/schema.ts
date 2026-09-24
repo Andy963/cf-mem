@@ -126,6 +126,25 @@ function sanitizeFilter(filter: Record<string, Primitive> | undefined, projectId
   return Object.keys(sanitized).length > 0 ? sanitized : undefined;
 }
 
+function normalizeSearchFilter(value: unknown): Record<string, Primitive> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new MemorySchemaError("filter must be an object");
+  }
+
+  const normalized: Record<string, Primitive> = {};
+  for (const [key, filterValue] of Object.entries(value)) {
+    const isPrimitive = typeof filterValue === "string"
+      || (typeof filterValue === "number" && Number.isFinite(filterValue))
+      || typeof filterValue === "boolean";
+    if (!isPrimitive) {
+      throw new MemorySchemaError(`filter.${key} must be a string, finite number, or boolean`);
+    }
+    normalized[key] = filterValue;
+  }
+
+  return normalized;
+}
+
 function buildVectorMetadata(metadata?: Record<string, unknown>): Record<string, Primitive> | undefined {
   if (!metadata) return undefined;
 
@@ -247,9 +266,7 @@ export const defaultMemorySchema: MemoryShapeAdapter = {
 
     const rawTopK = record.topK ?? record.top_k;
     const topK = typeof rawTopK === "number" ? rawTopK : undefined;
-    const rawFilter: Record<string, Primitive> = record.filter && typeof record.filter === "object" && !Array.isArray(record.filter)
-      ? { ...(record.filter as Record<string, Primitive>) }
-      : {};
+    const rawFilter = record.filter === undefined ? {} : normalizeSearchFilter(record.filter);
 
     if (record.workspace_id !== undefined && record.workspace_id !== null) {
       if (typeof record.workspace_id !== "string" || !record.workspace_id.trim()) {
