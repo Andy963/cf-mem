@@ -4,7 +4,7 @@ import type { Env } from "../env";
 import { chunkArray } from "../utils";
 import { rawMemoryExpiresAt } from "./retention";
 import type { PreparedIndexItem } from "./schema";
-import { completeSegmentVectorJobs } from "./segment-reconciliation";
+import { completeSegmentVectorJobs, ensureLatestSegmentVectorJobs } from "./segment-reconciliation";
 
 const EMBEDDING_BATCH_SIZE = 32;
 
@@ -41,26 +41,33 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
 
   if (itemsToUpsert.length > 0) {
     for (const batch of chunkArray(itemsToUpsert, EMBEDDING_BATCH_SIZE)) {
+      const durableBatch = batch.map((item) => ({ ...item, vectorOperationToken: crypto.randomUUID() }));
       const vectors = await embedTexts(
         env,
-        batch.map((item) => item.text),
+        durableBatch.map((item) => item.text),
       );
 
       if (vectors.length !== batch.length) {
         throw new Error(`Embedding count mismatch. expected=${batch.length} actual=${vectors.length}`);
       }
 
-      await upsertSegments(env.DB, batch, now, rawMemoryExpiresAt(env, now));
+      await upsertSegments(env.DB, durableBatch, now, rawMemoryExpiresAt(env, now));
 
       await env.SEGMENTS_INDEX.upsert(
-        batch.map((item, index) => ({
+        durableBatch.map((item, index) => ({
           id: item.id,
           namespace: item.namespace,
           values: vectors[index],
           metadata: item.vectorMetadata,
         })),
       );
-      await completeSegmentVectorJobs(env.DB, batch, now);
+      const completed = await completeSegmentVectorJobs(env.DB, durableBatch, now);
+      const staleItems = durableBatch.filter((item) => !completed.get(item.id));
+      if (staleItems.length > 0) {
+        if (!env.SEGMENTS_INDEX.deleteByIds) throw new Error("SEGMENTS_INDEX deletion is unavailable");
+        await env.SEGMENTS_INDEX.deleteByIds(staleItems.map((item) => item.id));
+        await ensureLatestSegmentVectorJobs(env, staleItems);
+      }
     }
   }
 

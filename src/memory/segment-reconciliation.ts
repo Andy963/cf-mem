@@ -51,11 +51,38 @@ export async function completeSegmentVectorJobs(
   db: Env["DB"],
   items: PreparedIndexItem[],
   updatedAt: number,
-): Promise<void> {
-  if (items.length === 0) return;
-  await db.batch(items.map((item) => db.prepare(
-    "DELETE FROM memory_segment_vector_jobs WHERE project_id = ? AND segment_id = ? AND segment_updated_at = ? AND status = 'pending'",
-  ).bind(item.projectId, item.id, updatedAt)));
+): Promise<Map<string, boolean>> {
+  const completed = new Map<string, boolean>();
+  if (items.length === 0) return completed;
+  const results = await db.batch(items.map((item) => db.prepare(
+    "DELETE FROM memory_segment_vector_jobs WHERE project_id = ? AND segment_id = ? AND segment_updated_at = ? AND operation_token = ? AND status = 'pending'",
+  ).bind(item.projectId, item.id, updatedAt, item.vectorOperationToken ?? null)));
+  results.forEach((result, index) => completed.set(items[index].id, result.meta.changes === 1));
+  return completed;
+}
+
+export async function ensureLatestSegmentVectorJobs(env: Env, items: PreparedIndexItem[]): Promise<void> {
+  for (const item of items) {
+    const row = await env.DB.prepare("SELECT project_id, updated_at, deletion_state FROM memory_segments WHERE id = ?")
+      .bind(item.id).first<{ project_id: string; updated_at: number; deletion_state: string }>();
+    const now = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO memory_segment_vector_jobs (
+        project_id, segment_id, revision, operation, segment_updated_at, status,
+        attempt_count, last_error, next_attempt_at, lease_token, lease_expires_at,
+        operation_token, created_at, updated_at
+      ) VALUES (?, ?, 1, ?, ?, 'pending', 0, NULL, ?, NULL, NULL, NULL, ?, ?)
+      ON CONFLICT (project_id, segment_id) DO UPDATE SET
+        revision = memory_segment_vector_jobs.revision + 1,
+        operation = excluded.operation,
+        segment_updated_at = excluded.segment_updated_at,
+        status = CASE WHEN memory_segment_vector_jobs.status = 'processing' THEN 'processing' ELSE 'pending' END,
+        last_error = NULL,
+        next_attempt_at = excluded.next_attempt_at,
+        operation_token = NULL,
+        updated_at = excluded.updated_at`,
+    ).bind(row?.project_id ?? item.projectId, item.id, row?.deletion_state === "active" ? "upsert" : "delete", row?.updated_at ?? now, now, now, now).run();
+  }
 }
 
 async function listReadyJobs(env: Env, now: number, limit: number): Promise<SegmentVectorJob[]> {
@@ -119,7 +146,15 @@ async function reconcileJob(env: Env, job: SegmentVectorJob): Promise<void> {
     `DELETE FROM memory_segment_vector_jobs
      WHERE project_id = ? AND segment_id = ? AND status = 'processing' AND lease_token = ? AND revision = ?`,
   ).bind(job.project_id, job.segment_id, job.lease_token, job.revision).run();
-  if (completed.meta.changes === 0) await releaseSuperseded(env, job);
+  if (completed.meta.changes === 0) {
+    if (!env.SEGMENTS_INDEX.deleteByIds) throw new Error("SEGMENTS_INDEX deletion is unavailable");
+    await env.SEGMENTS_INDEX.deleteByIds([job.segment_id]);
+    await ensureLatestSegmentVectorJobs(env, [{
+      item: { id: job.segment_id, text: "" }, id: job.segment_id, text: "", contentHash: "",
+      metadataJson: "{}", projectId: job.project_id, namespace: `project:${job.project_id}`, sessionId: null, tape: null,
+    }]);
+    await releaseSuperseded(env, job);
+  }
 }
 
 async function recordFailure(env: Env, job: SegmentVectorJob, error: unknown): Promise<void> {

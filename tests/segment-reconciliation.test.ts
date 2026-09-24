@@ -14,7 +14,12 @@ vi.mock("../src/db/d1", async (importOriginal) => {
 });
 vi.mock("../src/memory/segment-reconciliation", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/memory/segment-reconciliation")>();
-  return { ...original, completeSegmentVectorJobs: vi.fn(async () => undefined) };
+  return {
+    ...original,
+    completeSegmentVectorJobs: vi.fn(async (_db: D1Database, items: PreparedIndexItem[]) =>
+      new Map(items.map((item) => [item.id, true]))),
+    ensureLatestSegmentVectorJobs: vi.fn(async () => undefined),
+  };
 });
 
 function createItem(): PreparedIndexItem {
@@ -78,9 +83,18 @@ describe("segment index outbox ordering", () => {
     expect(upsertSegments).toHaveBeenCalledOnce();
     expect(completeSegmentVectorJobs).not.toHaveBeenCalled();
   });
+
+  it("deletes its vector and requeues latest state when completion is fenced", async () => {
+    const env = createEnv();
+    vi.mocked(completeSegmentVectorJobs).mockResolvedValueOnce(new Map([["project:project-1:seg-1", false]]));
+
+    await indexMemoryItems(env, [createItem()]);
+
+    expect(env.SEGMENTS_INDEX.deleteByIds).toHaveBeenCalledWith(["project:project-1:seg-1"]);
+  });
 });
 
-function reconciliationDatabase(options: { row?: Record<string, unknown> | null; jobRevision?: number } = {}) {
+function reconciliationDatabase(options: { row?: Record<string, unknown> | null; jobRevision?: number; completionChanges?: number } = {}) {
   const state = {
     upsertCalls: [] as unknown[][],
     deleteCalls: [] as string[][],
@@ -118,7 +132,7 @@ function reconciliationDatabase(options: { row?: Record<string, unknown> | null;
           return null;
         },
         async run() {
-          return { success: true, meta: { changes: 1 } };
+          return { success: true, meta: { changes: sql.startsWith("DELETE FROM memory_segment_vector_jobs") ? (options.completionChanges ?? 1) : 1 } };
         },
       };
     },
@@ -174,6 +188,22 @@ describe("segment vector reconciliation", () => {
 
     await runSegmentVectorReconciliation(env);
 
+    expect(env.SEGMENTS_INDEX.deleteByIds).toHaveBeenCalledWith(["project:project-1:seg-1"]);
+  });
+
+  it("removes a stale vector and requeues when the job revision changed", async () => {
+    const { database } = reconciliationDatabase({
+      row: {
+        id: "project:project-1:seg-1", project_id: "project-1", text: "durable text",
+        metadata_json: "{}", session_id: null, tape: null, updated_at: 10,
+      },
+      completionChanges: 0,
+    });
+    const env = { ...createEnv(), DB: database as unknown as D1Database };
+
+    await runSegmentVectorReconciliation(env);
+
+    expect(env.SEGMENTS_INDEX.upsert).toHaveBeenCalledOnce();
     expect(env.SEGMENTS_INDEX.deleteByIds).toHaveBeenCalledWith(["project:project-1:seg-1"]);
   });
 });

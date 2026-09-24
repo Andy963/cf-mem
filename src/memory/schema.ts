@@ -43,6 +43,7 @@ export interface PreparedIndexItem {
   sessionId: string | null;
   tape: string | null;
   vectorMetadata?: Record<string, Primitive>;
+  vectorOperationToken?: string;
 }
 
 export interface StoredMemoryRow extends Record<string, unknown> {
