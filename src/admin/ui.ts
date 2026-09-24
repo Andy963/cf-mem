@@ -115,13 +115,13 @@ export const DASHBOARD_HTML = `<!doctype html>
     .test-verdict.reject { color: var(--danger); }
     .test-verdict.hold { color: #ffd9a0; }
     .test-raw { margin-top: 12px; max-height: 300px; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--subtle); background: #0d141c; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-    dialog { width: min(920px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; color: #edf3fa; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: 0 30px 80px rgba(0, 0, 0, .5); }
+    dialog { display: flex; flex-direction: column; width: min(920px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; color: #edf3fa; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: 0 30px 80px rgba(0, 0, 0, .5); }
     dialog::backdrop { background: rgba(4, 8, 12, .76); backdrop-filter: blur(3px); }
-    .dialog-head { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px 18px; border-bottom: 1px solid var(--border); background: rgba(21, 28, 38, .97); }
+    .dialog-head { position: sticky; top: 0; z-index: 2; flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px 18px; border-bottom: 1px solid var(--border); background: rgba(21, 28, 38, .97); }
     .dialog-head h2 { margin: 0; font-size: 19px; }
     .dialog-actions { flex-wrap: wrap; justify-content: flex-end; }
     .destructive-actions { display: flex; align-items: center; gap: 8px; padding-left: 10px; border-left: 1px solid #7b4646; }
-    #claim-detail { max-height: calc(100dvh - 86px); overflow-y: auto; padding: 18px; }
+    #claim-detail { flex: 1 1 auto; min-height: 0; max-height: calc(100dvh - 86px); overflow-y: auto; padding: 18px; }
     .detail-section + .detail-section { margin-top: 16px; }
     .detail-section { padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-soft); }
     .detail-section h3 { margin: 0 0 12px; font-size: 14px; letter-spacing: .04em; text-transform: uppercase; }
@@ -297,6 +297,7 @@ export const DASHBOARD_HTML = `<!doctype html>
     function setText(id, value) { document.getElementById(id).textContent = value; }
     function createCell(value, className) { const cell = document.createElement("td"); if (className) cell.className = className; cell.textContent = value; return cell; }
     function createBadge(value) { const element = document.createElement("span"); element.className = "badge " + value; element.textContent = label(value); return element; }
+    function createOption(text, value) { const option = document.createElement("option"); option.textContent = text; option.value = value; return option; }
     function splitLabels(value) { return value ? value.split(",").filter(Boolean) : []; }
     function labels(values, className, transform) {
       const fragment = document.createDocumentFragment();
@@ -397,8 +398,8 @@ export const DASHBOARD_HTML = `<!doctype html>
         }
         const select = document.getElementById("claim-project");
         const selected = select.value;
-        select.replaceChildren(new Option("All projects", ""));
-        for (const project of data.projects) select.add(new Option(project.project_id, project.project_id));
+        select.replaceChildren(createOption("All projects", ""));
+        for (const project of data.projects) select.add(createOption(project.project_id, project.project_id));
         select.value = selected;
       } catch (cause) {
         showError(cause instanceof Error ? cause.message : "The dashboard data could not be loaded.");
@@ -450,6 +451,7 @@ export const DASHBOARD_HTML = `<!doctype html>
       edit.className = "op-button edit-claim";
       edit.dataset.claimId = claim.id;
       edit.textContent = "Edit";
+      edit.setAttribute("aria-label", "Edit claim " + claim.subject);
       const divider = document.createElement("span");
       divider.className = "action-divider";
       divider.setAttribute("aria-hidden", "true");
@@ -458,6 +460,7 @@ export const DASHBOARD_HTML = `<!doctype html>
       remove.className = "op-button danger delete-claim";
       remove.dataset.claimId = claim.id;
       remove.textContent = "Delete";
+      remove.setAttribute("aria-label", "Delete claim " + claim.subject);
       container.append(edit, divider, remove);
       return container;
     }
@@ -797,7 +800,7 @@ export const DASHBOARD_HTML = `<!doctype html>
       if (projectAction) {
         document.getElementById("claim-project").value = projectAction.dataset.projectId;
         claimState.page = 1;
-        setView("claims");
+        setView("claims", true);
         loadClaims();
         return;
       }
