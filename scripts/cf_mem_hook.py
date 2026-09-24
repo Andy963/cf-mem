@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 _DEFAULT_CONFIG_PATH = Path.home() / ".config" / "cf-mem" / "config.json"
 _FALLBACK_CONFIG_PATH = Path.home() / ".config" / "whisper-profile-memory" / "config.json"
@@ -72,6 +72,22 @@ _TEMP_ROOTS = _temp_roots()
 _NON_PROJECT_EXACT = frozenset({Path("/")})
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+_HTTP_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
 def _resolve_config_path(raw_path: str | None = None) -> Path:
     if raw_path and raw_path.strip():
         return Path(raw_path).expanduser().resolve()
@@ -99,6 +115,11 @@ def _load_config(raw_path: str | None = None) -> dict[str, str]:
     project_id = str(data.get("project_id") or "").strip()
     if not base_url or not token or not owner_id:
         raise RuntimeError("Config requires base_url, token, and owner_id")
+    parsed_url = urlsplit(base_url)
+    if parsed_url.scheme.lower() != "https" or not parsed_url.netloc:
+        raise RuntimeError("Config base_url must be an absolute HTTPS URL")
+    if parsed_url.username is not None or parsed_url.password is not None:
+        raise RuntimeError("Config base_url must not contain URL credentials")
     if not base_url.endswith("/memory"):
         base_url = f"{base_url}/memory"
     return {"base_url": base_url, "token": token, "owner_id": owner_id, "project_id": project_id}
@@ -413,7 +434,7 @@ def _http_get(url: str, token: str, project_id: str = "", timeout: float = _DEFA
         },
         method="GET",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _HTTP_OPENER.open(req, timeout=timeout) as resp:
         content = resp.read().decode("utf-8")
         if content.strip():
             try:
@@ -435,7 +456,7 @@ def _http_post(url: str, token: str, body: dict[str, Any], project_id: str = "",
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _HTTP_OPENER.open(req, timeout=timeout) as resp:
         content = resp.read().decode("utf-8")
         if content.strip():
             try:
