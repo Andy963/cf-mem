@@ -115,7 +115,9 @@ export const DASHBOARD_HTML = `<!doctype html>
     .test-verdict.reject { color: var(--danger); }
     .test-verdict.hold { color: #ffd9a0; }
     .test-raw { margin-top: 12px; max-height: 300px; overflow: auto; padding: 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--subtle); background: #0d141c; font: 12px/1.5 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-    dialog { display: flex; flex-direction: column; width: min(920px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; color: #edf3fa; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: 0 30px 80px rgba(0, 0, 0, .5); }
+    dialog { width: min(920px, calc(100% - 32px)); max-height: calc(100dvh - 32px); padding: 0; overflow: hidden; color: #edf3fa; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--surface); box-shadow: 0 30px 80px rgba(0, 0, 0, .5); }
+    dialog:not([open]) { display: none; }
+    dialog[open] { display: flex; flex-direction: column; }
     dialog::backdrop { background: rgba(4, 8, 12, .76); backdrop-filter: blur(3px); }
     .dialog-head { position: sticky; top: 0; z-index: 2; flex: 0 0 auto; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 16px 18px; border-bottom: 1px solid var(--border); background: rgba(21, 28, 38, .97); }
     .dialog-head h2 { margin: 0; font-size: 19px; }

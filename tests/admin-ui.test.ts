@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Window } from "happy-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DASHBOARD_HTML } from "../src/admin/ui";
@@ -61,7 +65,8 @@ describe("Admin dashboard information architecture", () => {
   });
 
   it("keeps the mobile detail drawer scrollable", () => {
-    expect(DASHBOARD_HTML).toContain("dialog { display: flex; flex-direction: column;");
+    expect(DASHBOARD_HTML).toContain("dialog:not([open]) { display: none; }");
+    expect(DASHBOARD_HTML).toContain("dialog[open] { display: flex; flex-direction: column; }");
     expect(DASHBOARD_HTML).toContain("#claim-detail { flex: 1 1 auto; min-height: 0;");
     expect(DASHBOARD_HTML).toContain("overflow-y: auto; padding: 18px;");
   });
@@ -89,6 +94,28 @@ describe("Admin dashboard information architecture", () => {
   it("emits syntactically valid inline JavaScript", () => {
     expect(() => new Function(inlineScript())).not.toThrow();
   });
+
+  const chromePath = process.env.CHROME_BIN || ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"].find(existsSync);
+  it.skipIf(!chromePath)("keeps a closed claim dialog hidden in Chromium", () => {
+    const directory = mkdtempSync(join(tmpdir(), "cf-mem-admin-ui-"));
+    const file = join(directory, "dashboard.html");
+    try {
+      const measurement = `<script>setTimeout(() => { document.body.dataset.closedDialogDisplay = getComputedStyle(document.getElementById("claim-dialog")).display; }, 50);</script>`;
+      writeFileSync(file, DASHBOARD_HTML.replace(/<script>[\s\S]*<\/script>/, measurement));
+      const output = execFileSync(chromePath as string, [
+        "--headless",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--virtual-time-budget=500",
+        "--dump-dom",
+        `file://${file}`
+      ], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+
+      expect(output).toContain('data-closed-dialog-display="none"');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 const sampleClaim = {
