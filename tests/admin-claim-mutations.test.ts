@@ -14,8 +14,12 @@ class RecordingDatabase {
   readonly runCalls: BoundStatement[] = [];
   failBatchIndex: number | null = null;
   existingTag: string | null = null;
+  currentClaim: StoredClaimRow | null;
+  auditCount = 0;
 
-  constructor(readonly claim: StoredClaimRow | null) {}
+  constructor(claim: StoredClaimRow | null) {
+    this.currentClaim = claim;
+  }
 
   prepare(sql: string) {
     const values: unknown[] = [];
@@ -27,10 +31,13 @@ class RecordingDatabase {
         return this;
       },
       async first<T>() {
-        if (sql.includes("FROM memory_claims")) return (statement as { claim?: T }).claim ?? null;
+        if (sql.includes("FROM memory_claims")) {
+          return ((statement as { database?: RecordingDatabase }).database?.currentClaim as T | undefined) ?? null;
+        }
         if (sql.includes("SELECT tag FROM memory_claim_tags")) {
-          return (statement as { existingTag?: string }).existingTag
-            ? ({ tag: statement.existingTag } as T)
+          const database = (statement as { database?: RecordingDatabase }).database;
+          return database?.existingTag
+            ? ({ tag: database.existingTag } as T)
             : null;
         }
         return null;
@@ -43,7 +50,7 @@ class RecordingDatabase {
         return { success: true, meta: { changes: 1 } };
       },
     };
-    Object.assign(statement, { claim: this.claim, existingTag: this.existingTag, runCalls: this.runCalls });
+    Object.assign(statement, { database: this, runCalls: this.runCalls });
     return statement;
   }
 
@@ -53,7 +60,19 @@ class RecordingDatabase {
     if (this.failBatchIndex !== null && this.failBatchIndex < bound.length) {
       throw new Error("injected batch failure");
     }
-    return bound.map(() => ({ success: true, meta: { changes: 1 } }));
+    const guard = bound[0];
+    const expectedUpdatedAt = Number(guard.values[3]);
+    const nextUpdatedAt = Number(guard.values[0]);
+    const guardChanges = this.currentClaim && this.currentClaim.updated_at === expectedUpdatedAt ? 1 : 0;
+    const localClaim = guardChanges === 1 && this.currentClaim
+      ? { ...this.currentClaim, updated_at: nextUpdatedAt }
+      : this.currentClaim;
+    const deletesClaim = bound.some((statement) => statement.sql.includes("DELETE FROM memory_claims"));
+    const nextClaim = guardChanges === 1 && deletesClaim ? null : localClaim;
+    const auditChanges = guardChanges === 1 && bound.some((statement) => statement.sql.includes("INSERT INTO memory_claim_audit_log")) ? 1 : 0;
+    this.currentClaim = nextClaim;
+    this.auditCount += auditChanges;
+    return bound.map((_, index) => ({ success: true, meta: { changes: index === 0 ? guardChanges : guardChanges } }));
   }
 }
 
@@ -130,10 +149,12 @@ describe("admin claim atomic mutations", () => {
     expect(response.status).toBe(200);
     expect(database.batches).toHaveLength(1);
     expect(database.batches[0].map((statement) => statement.sql)).toEqual([
+      expect.stringContaining("SET updated_at = ?"),
       expect.stringContaining("UPDATE memory_claims"),
       expect.stringContaining("INSERT INTO memory_claim_audit_log"),
     ]);
-    expect(database.batches[0][1].values[3]).toBe("edit");
+    expect(database.batches[0][2].values[3]).toBe("edit");
+    expect(database.auditCount).toBe(1);
     expect(database.runCalls).toHaveLength(0);
   });
 
@@ -142,8 +163,8 @@ describe("admin claim atomic mutations", () => {
     const response = await send(database, "POST", "/admin/api/claims/claim-1/retract", { reason: "invalid" });
 
     expect(response.status).toBe(200);
-    expect(database.batches[0]).toHaveLength(2);
-    expect(database.batches[0][1].values[3]).toBe("retract");
+    expect(database.batches[0]).toHaveLength(3);
+    expect(database.batches[0][2].values[3]).toBe("retract");
   });
 
   it.each([
@@ -155,8 +176,8 @@ describe("admin claim atomic mutations", () => {
     const response = await send(database, method, path, body);
 
     expect(response.status).toBe(200);
-    expect(database.batches[0]).toHaveLength(2);
-    expect(database.batches[0][1].values[3]).toBe(action);
+    expect(database.batches[0]).toHaveLength(3);
+    expect(database.batches[0][2].values[3]).toBe(action);
   });
 
   it("preserves audit history and records deletion in the same batch", async () => {
@@ -165,24 +186,26 @@ describe("admin claim atomic mutations", () => {
 
     expect(response.status).toBe(200);
     expect(database.batches[0].map((statement) => statement.sql)).toEqual([
+      expect.stringContaining("SET updated_at = ?"),
       expect.stringContaining("DELETE FROM memory_claim_tags"),
       expect.stringContaining("DELETE FROM memory_evidence"),
       expect.stringContaining("INSERT INTO memory_claim_audit_log"),
       expect.stringContaining("DELETE FROM memory_claims"),
     ]);
-    expect(database.batches[0][2].values[3]).toBe("delete");
-    expect(JSON.parse(String(database.batches[0][2].values[6])).status).toBe("active");
+    expect(database.batches[0][3].values[3]).toBe("delete");
+    expect(JSON.parse(String(database.batches[0][3].values[6])).status).toBe("active");
+    expect(database.auditCount).toBe(1);
   });
 
   it.each([
-    { name: "edit", method: "PUT", path: "/admin/api/claims/claim-1", body: { canonical_text: "After", value: { value: "after" } }, length: 2 },
-    { name: "retract", method: "POST", path: "/admin/api/claims/claim-1/retract", body: {}, length: 2 },
-    { name: "tag add", method: "POST", path: "/admin/api/claims/claim-1/tags", body: { tag: "backend" }, length: 2 },
-    { name: "tag remove", method: "DELETE", path: "/admin/api/claims/claim-1/tags/backend", body: {}, length: 2, existingTag: "backend" },
-    { name: "delete tags", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 4 },
-    { name: "delete evidence", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 4, failAt: 1 },
-    { name: "delete audit", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 4, failAt: 2 },
-    { name: "delete claim", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 4, failAt: 3 },
+    { name: "edit", method: "PUT", path: "/admin/api/claims/claim-1", body: { canonical_text: "After", value: { value: "after" } }, length: 3 },
+    { name: "retract", method: "POST", path: "/admin/api/claims/claim-1/retract", body: {}, length: 3 },
+    { name: "tag add", method: "POST", path: "/admin/api/claims/claim-1/tags", body: { tag: "backend" }, length: 3 },
+    { name: "tag remove", method: "DELETE", path: "/admin/api/claims/claim-1/tags/backend", body: {}, length: 3, existingTag: "backend" },
+    { name: "delete tags", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 5 },
+    { name: "delete evidence", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 5, failAt: 1 },
+    { name: "delete audit", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 5, failAt: 3 },
+    { name: "delete claim", method: "DELETE", path: "/admin/api/claims/claim-1", body: {}, length: 5, failAt: 4 },
   ])("keeps $name atomic when a batch statement fails", async ({ method, path, body, length, failAt, existingTag }) => {
     const database = new RecordingDatabase(createClaim());
     database.existingTag = existingTag ?? null;
@@ -195,6 +218,21 @@ describe("admin claim atomic mutations", () => {
     expect(database.batches).toHaveLength(1);
     expect(database.batches[0]).toHaveLength(length);
     expect(database.runCalls).toHaveLength(0);
+    expect(database.currentClaim).not.toBeNull();
+    expect(database.auditCount).toBe(0);
+  });
+
+  it("allows only one concurrent delete audit for the same claim", async () => {
+    const database = new RecordingDatabase(createClaim());
+    const responses = await Promise.all([
+      send(database, "DELETE", "/admin/api/claims/claim-1", { reason: "first" }),
+      send(database, "DELETE", "/admin/api/claims/claim-1", { reason: "retry" }),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(database.batches).toHaveLength(2);
+    expect(database.auditCount).toBe(1);
+    expect(database.currentClaim).toBeNull();
   });
 
   it("treats completed retries as no-op", async () => {
