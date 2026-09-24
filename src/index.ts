@@ -109,7 +109,9 @@ export default {
         .catch((error) => {
           console.error(`[cron] evidence_flush failed: ${error instanceof Error ? error.message : String(error)}`);
         })
-        .then(() => runRetentionSweep(env))
+        .then(() => runRetentionSweep(env).catch((error) => {
+          console.error(`[cron] retention_sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+        }))
         .then(() => Promise.allSettled([
           processProfileJobs(env, PROFILE_JOBS_PER_TICK),
           runClaimVectorReconciliation(env),

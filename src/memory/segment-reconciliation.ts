@@ -63,15 +63,31 @@ export async function completeSegmentVectorJobs(
 
 export async function ensureLatestSegmentVectorJobs(env: Env, items: PreparedIndexItem[]): Promise<void> {
   for (const item of items) {
-    const row = await env.DB.prepare("SELECT project_id, updated_at, deletion_state FROM memory_segments WHERE id = ?")
-      .bind(item.id).first<{ project_id: string; updated_at: number; deletion_state: string }>();
     const now = Date.now();
     await env.DB.prepare(
       `INSERT INTO memory_segment_vector_jobs (
         project_id, segment_id, revision, operation, segment_updated_at, status,
         attempt_count, last_error, next_attempt_at, lease_token, lease_expires_at,
         operation_token, created_at, updated_at
-      ) VALUES (?, ?, 1, ?, ?, 'pending', 0, NULL, ?, NULL, NULL, NULL, ?, ?)
+      )
+      SELECT
+        COALESCE((SELECT project_id FROM memory_segments WHERE id = ?), ?),
+        ?,
+        1,
+        CASE
+          WHEN COALESCE((SELECT deletion_state FROM memory_segments WHERE id = ?), 'missing') = 'active' THEN 'upsert'
+          ELSE 'delete'
+        END,
+        COALESCE((SELECT updated_at FROM memory_segments WHERE id = ?), ?),
+        'pending',
+        0,
+        NULL,
+        ?,
+        NULL,
+        NULL,
+        NULL,
+        ?,
+        ?
       ON CONFLICT (project_id, segment_id) DO UPDATE SET
         revision = memory_segment_vector_jobs.revision + 1,
         operation = excluded.operation,
@@ -80,8 +96,19 @@ export async function ensureLatestSegmentVectorJobs(env: Env, items: PreparedInd
         last_error = NULL,
         next_attempt_at = excluded.next_attempt_at,
         operation_token = NULL,
-        updated_at = excluded.updated_at`,
-    ).bind(row?.project_id ?? item.projectId, item.id, row?.deletion_state === "active" ? "upsert" : "delete", row?.updated_at ?? now, now, now, now).run();
+        updated_at = excluded.updated_at
+      WHERE excluded.segment_updated_at >= memory_segment_vector_jobs.segment_updated_at`,
+    ).bind(
+      item.id,
+      item.projectId,
+      item.id,
+      item.id,
+      item.id,
+      now,
+      now,
+      now,
+      now,
+    ).run();
   }
 }
 

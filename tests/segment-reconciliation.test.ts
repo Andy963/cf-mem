@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env, VectorizeIndex } from "../src/env";
 import { indexMemoryItems } from "../src/memory/indexer";
 import type { PreparedIndexItem } from "../src/memory/schema";
-import { cleanupOrphanSegmentVectors, runSegmentVectorReconciliation } from "../src/memory/segment-reconciliation";
+import { cleanupOrphanSegmentVectors, ensureLatestSegmentVectorJobs, runSegmentVectorReconciliation } from "../src/memory/segment-reconciliation";
 import { upsertSegments } from "../src/db/d1";
 import { completeSegmentVectorJobs } from "../src/memory/segment-reconciliation";
 
@@ -91,6 +91,7 @@ describe("segment index outbox ordering", () => {
     await indexMemoryItems(env, [createItem()]);
 
     expect(env.SEGMENTS_INDEX.deleteByIds).toHaveBeenCalledWith(["project:project-1:seg-1"]);
+    expect(ensureLatestSegmentVectorJobs).toHaveBeenCalledOnce();
   });
 });
 
@@ -98,6 +99,7 @@ function reconciliationDatabase(options: { row?: Record<string, unknown> | null;
   const state = {
     upsertCalls: [] as unknown[][],
     deleteCalls: [] as string[][],
+    statements: [] as Array<{ sql: string; values: unknown[] }>,
   };
   const job = {
     project_id: "project-1",
@@ -132,6 +134,7 @@ function reconciliationDatabase(options: { row?: Record<string, unknown> | null;
           return null;
         },
         async run() {
+          state.statements.push({ sql, values: [...values] });
           return { success: true, meta: { changes: sql.startsWith("DELETE FROM memory_segment_vector_jobs") ? (options.completionChanges ?? 1) : 1 } };
         },
       };
@@ -192,7 +195,7 @@ describe("segment vector reconciliation", () => {
   });
 
   it("removes a stale vector and requeues when the job revision changed", async () => {
-    const { database } = reconciliationDatabase({
+    const { database, state } = reconciliationDatabase({
       row: {
         id: "project:project-1:seg-1", project_id: "project-1", text: "durable text",
         metadata_json: "{}", session_id: null, tape: null, updated_at: 10,
@@ -205,6 +208,45 @@ describe("segment vector reconciliation", () => {
 
     expect(env.SEGMENTS_INDEX.upsert).toHaveBeenCalledOnce();
     expect(env.SEGMENTS_INDEX.deleteByIds).toHaveBeenCalledWith(["project:project-1:seg-1"]);
+    expect(state.statements.some((statement) =>
+      statement.sql.includes("INSERT INTO memory_segment_vector_jobs") &&
+      statement.sql.includes("excluded.segment_updated_at >= memory_segment_vector_jobs.segment_updated_at"),
+    )).toBe(true);
+  });
+});
+
+describe("atomic segment requeue", () => {
+  it("uses one monotonic INSERT SELECT without a prior read", async () => {
+    const actual = await vi.importActual<typeof import("../src/memory/segment-reconciliation")>("../src/memory/segment-reconciliation");
+    const statements: Array<{ sql: string; values: unknown[] }> = [];
+    const database = {
+      prepare(sql: string) {
+        const statement = {
+          sql,
+          values: [] as unknown[],
+          bind(...values: unknown[]) {
+            statement.values.push(...values);
+            return statement;
+          },
+          async run() {
+            statements.push(statement);
+            return { success: true, meta: { changes: 1 } };
+          },
+          async first() {
+            throw new Error("requeue must not read before writing");
+          },
+        };
+        return statement;
+      },
+    };
+    const env = { ...createEnv(), DB: database as unknown as D1Database };
+
+    await actual.ensureLatestSegmentVectorJobs(env, [createItem()]);
+
+    expect(statements).toHaveLength(1);
+    expect(statements[0].sql).toContain("INSERT INTO memory_segment_vector_jobs");
+    expect(statements[0].sql).toContain("SELECT");
+    expect(statements[0].sql).toContain("excluded.segment_updated_at >= memory_segment_vector_jobs.segment_updated_at");
   });
 });
 
