@@ -4,6 +4,7 @@ import type { Env } from "../env";
 import { chunkArray } from "../utils";
 import { rawMemoryExpiresAt } from "./retention";
 import type { PreparedIndexItem } from "./schema";
+import { completeSegmentVectorJobs } from "./segment-reconciliation";
 
 const EMBEDDING_BATCH_SIZE = 32;
 
@@ -49,6 +50,8 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
         throw new Error(`Embedding count mismatch. expected=${batch.length} actual=${vectors.length}`);
       }
 
+      await upsertSegments(env.DB, batch, now, rawMemoryExpiresAt(env, now));
+
       await env.SEGMENTS_INDEX.upsert(
         batch.map((item, index) => ({
           id: item.id,
@@ -57,16 +60,7 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
           metadata: item.vectorMetadata,
         })),
       );
-
-      try {
-        await upsertSegments(env.DB, batch, now, rawMemoryExpiresAt(env, now));
-      } catch (error) {
-        // Vectors are written before their rows, so a D1 failure here orphans
-        // them. Search still ignores orphans (fetchByIds finds no row), but they
-        // keep consuming index quota until the same id is indexed again.
-        console.error(`[index] D1 upsert failed after writing ${batch.length} vector(s) in project ${projectId}: ${error instanceof Error ? error.message : String(error)}`);
-        throw error;
-      }
+      await completeSegmentVectorJobs(env.DB, batch, now);
     }
   }
 
