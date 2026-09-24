@@ -174,13 +174,16 @@ async function reconcileJob(env: Env, job: SegmentVectorJob): Promise<void> {
      WHERE project_id = ? AND segment_id = ? AND status = 'processing' AND lease_token = ? AND revision = ?`,
   ).bind(job.project_id, job.segment_id, job.lease_token, job.revision).run();
   if (completed.meta.changes === 0) {
-    if (!env.SEGMENTS_INDEX.deleteByIds) throw new Error("SEGMENTS_INDEX deletion is unavailable");
-    await env.SEGMENTS_INDEX.deleteByIds([job.segment_id]);
     await ensureLatestSegmentVectorJobs(env, [{
       item: { id: job.segment_id, text: "" }, id: job.segment_id, text: "", contentHash: "",
       metadataJson: "{}", projectId: job.project_id, namespace: `project:${job.project_id}`, sessionId: null, tape: null,
     }]);
-    await releaseSuperseded(env, job);
+    try {
+      if (!env.SEGMENTS_INDEX.deleteByIds) throw new Error("SEGMENTS_INDEX deletion is unavailable");
+      await env.SEGMENTS_INDEX.deleteByIds([job.segment_id]);
+    } finally {
+      await releaseSuperseded(env, job);
+    }
   }
 }
 

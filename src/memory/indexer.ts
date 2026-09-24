@@ -64,9 +64,9 @@ export async function indexMemoryItems(env: Env, preparedItems: PreparedIndexIte
       const completed = await completeSegmentVectorJobs(env.DB, durableBatch, now);
       const staleItems = durableBatch.filter((item) => !completed.get(item.id));
       if (staleItems.length > 0) {
+        await ensureLatestSegmentVectorJobs(env, staleItems);
         if (!env.SEGMENTS_INDEX.deleteByIds) throw new Error("SEGMENTS_INDEX deletion is unavailable");
         await env.SEGMENTS_INDEX.deleteByIds(staleItems.map((item) => item.id));
-        await ensureLatestSegmentVectorJobs(env, staleItems);
       }
     }
   }

@@ -92,6 +92,8 @@ describe("segment index outbox ordering", () => {
 
     expect(env.SEGMENTS_INDEX.deleteByIds).toHaveBeenCalledWith(["project:project-1:seg-1"]);
     expect(ensureLatestSegmentVectorJobs).toHaveBeenCalledOnce();
+    expect(vi.mocked(ensureLatestSegmentVectorJobs).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(env.SEGMENTS_INDEX.deleteByIds).mock.invocationCallOrder[0]);
   });
 });
 
@@ -212,6 +214,25 @@ describe("segment vector reconciliation", () => {
       statement.sql.includes("INSERT INTO memory_segment_vector_jobs") &&
       statement.sql.includes("excluded.segment_updated_at >= memory_segment_vector_jobs.segment_updated_at"),
     )).toBe(true);
+  });
+
+  it("keeps the latest durable job when compensation deletion fails", async () => {
+    const { database, state } = reconciliationDatabase({
+      row: {
+        id: "project:project-1:seg-1", project_id: "project-1", text: "durable text",
+        metadata_json: "{}", session_id: null, tape: null, updated_at: 10,
+      },
+      completionChanges: 0,
+    });
+    const env = { ...createEnv(), DB: database as unknown as D1Database };
+    vi.mocked(env.SEGMENTS_INDEX.deleteByIds).mockImplementationOnce(async () => {
+      expect(state.statements.some((statement) => statement.sql.includes("INSERT INTO memory_segment_vector_jobs"))).toBe(true);
+      throw new Error("delete failed");
+    });
+
+    await runSegmentVectorReconciliation(env);
+
+    expect(state.statements.some((statement) => statement.sql.includes("SET status = CASE WHEN revision = ? THEN 'failed'"))).toBe(true);
   });
 });
 
