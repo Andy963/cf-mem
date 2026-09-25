@@ -13,7 +13,7 @@ import { runSegmentVectorReconciliation } from "./memory/segment-reconciliation"
 
 // Each job runs up to three sequential extractor calls with a 60s timeout each,
 // so two jobs is ~6 minutes worst case — within the waitUntil budget while
-// keeping the cron batch bounded at the current 5-minute interval.
+// keeping the cron batch bounded at the current 15-minute interval.
 const PROFILE_JOBS_PER_TICK = 2;
 
 async function validateRequestProjectId(request: Request, projectId: string): Promise<void> {

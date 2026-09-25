@@ -55,22 +55,40 @@ done
 npx wrangler d1 migrations apply cf-text --remote
 ```
 
-### 3. 配置鉴权
+### 3. 配置公开入口
+
+`wrangler.toml.example` 默认启用 fail-closed 路由：`workers_dev = false`、
+`preview_urls = false`，且没有默认公开地址。首次部署前必须在本地 `wrangler.toml`
+中配置一个受支持的自定义域名路由：
+
+```toml
+[[routes]]
+pattern = "mem.example.com/*"
+zone_name = "example.com"
+```
+
+把示例域名替换成 DNS 已托管到 Cloudflare 的域名。`/admin` 还需要额外的 Cloudflare
+Access 边界，不能只依赖自定义域名；不要通过重新启用 `workers.dev` 或 preview URL
+绕过 Admin 鉴权。
+
+### 4. 配置鉴权
 
 ```bash
-# 使用 embedding 或网页接口时需要
+# /health、embedding 或网页接口使用
 npx wrangler secret put API_TOKEN
 
-# /memory/* 使用全局鉴权 token；项目由请求头显式指定
-# 未设置 MEMORY_API_TOKEN 时会回退使用 API_TOKEN
-# npx wrangler secret put MEMORY_API_TOKEN
+# /memory/* 使用独立的全局鉴权 token；项目由请求头显式指定
+npx wrangler secret put MEMORY_API_TOKEN
 ```
+
+新部署应始终显式配置 `MEMORY_API_TOKEN`。只有迁移期间尚未设置它时，服务才会回退使用
+`API_TOKEN`；该兼容路径不应作为新客户端配置。
 
 请求示例：
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Authorization: Bearer $MEMORY_API_TOKEN" \
   -H "X-Project-Id: cf-mem" \
   -H "Content-Type: application/json" \
   https://<your-worker>/memory/index \
@@ -83,18 +101,18 @@ token + 显式项目头。迁移完成后删除这两个旧 secret。
 
 不要把 token 写进 `wrangler.toml`，也不要提交到 Git。
 
-### 4. 部署
+### 5. 部署
 
 ```bash
 npm run typecheck
 npm run deploy
 ```
 
-部署完成后，使用 Wrangler 输出的地址检查：
+部署完成后，使用上面配置的自定义域名检查：
 
 ```bash
 curl -sS -H "Authorization: Bearer $API_TOKEN" \
-  https://<your-worker>/health
+  https://mem.example.com/health
 ```
 
 ## 需要配置什么？
@@ -114,6 +132,29 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" \
 [`docs/configuration.md`](docs/configuration.md)。不要为了使用基础 embedding 接口预先配置
 项目记忆、个人记忆、Tavily、精排或管理后台。
 
+### 启用 Admin
+
+启用管理后台时，按以下顺序配置：
+
+1. 在 `wrangler.toml` 中配置自定义域名路由，并保持 `workers_dev = false`、
+   `preview_urls = false`。
+2. 为同一主机上的 `/admin*` 和 `/admin/api/*` 创建 Cloudflare Access Application，
+   策略只允许管理员登录。
+3. 将 Access Application AUD、Access team domain 和同一管理员邮箱写入本地配置：
+
+   ```toml
+   [vars]
+   ADMIN_ALLOWED_EMAIL = "admin@example.com"
+   ADMIN_ACCESS_TEAM_DOMAIN = "https://team.cloudflareaccess.com"
+   ADMIN_ACCESS_AUD = "your-application-aud-tag"
+   ```
+
+4. 重新部署后，未登录访问 `/admin` 应先经过 Access；允许的邮箱应能打开 Dashboard，
+   错误邮箱和缺少有效 Access JWT 的请求应被拒绝。
+
+完整变量表和边界说明见
+[`docs/configuration.md`](docs/configuration.md#管理后台)。
+
 ## 最小调用示例
 
 ### 生成 embedding
@@ -130,7 +171,7 @@ curl -sS \
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Authorization: Bearer $MEMORY_API_TOKEN" \
   -H "X-Project-Id: cf-mem" \
   -H "Content-Type: application/json" \
   https://<your-worker>/memory/index \
@@ -141,7 +182,7 @@ curl -sS \
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Authorization: Bearer $MEMORY_API_TOKEN" \
   -H "X-Project-Id: cf-mem" \
   -H "Content-Type: application/json" \
   https://<your-worker>/memory/search \
@@ -152,7 +193,7 @@ curl -sS \
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Authorization: Bearer $MEMORY_API_TOKEN" \
   -H "X-Project-Id: cf-mem" \
   -H "Content-Type: application/json" \
   https://<your-worker>/memory/claims \
@@ -178,6 +219,17 @@ curl -sS \
 Claims 的 `create` 会先检查身份键，再在同一项目、scope、分类、类型和 workspace 内做语义去重。
 相似事实会 reinforce；`rule` 和 `tool_insight` 的更新或冲突会自动 supersede 旧版本，其他分类仍不会被静默覆盖。完整规则见
 [`docs/durable-memory-design.md`](docs/durable-memory-design.md)。
+
+## 客户端集成
+
+新客户端直接调用 `/memory/*`，使用共享 `MEMORY_API_TOKEN` 并显式发送
+`X-Project-Id`。如果请求体同时包含 `project_id`，它必须与请求头一致；服务端不会再从
+workspace 名称或旧凭据推断项目。
+
+`scripts/install-hooks.sh` 和 `scripts/cf_mem_hook.py` 中的 `hook-context`、
+`hook-capture`、`hook-assistant` 仅作为已弃用的兼容适配器。新集成应使用运行时中间件或
+直接 HTTP API，迁移背景见
+[`docs/complete-guide.md`](docs/complete-guide.md#client-integration-contract)。
 
 ## 接口概览
 
@@ -233,7 +285,15 @@ npx wrangler vectorize list-metadata-index cf-claims
 npm run deploy
 ```
 
-Worker 每十五分钟执行一次 Cron，用于处理个人记忆提炼任务和清理过期原始记忆。
+Worker 每十五分钟执行一次 Cron，依次处理：
+
+- Nudge 扫描：把缺少角色标记的用户证据转换为提炼任务；
+- Evidence flush：提交已经就绪的批量证据；
+- Retention sweep：执行原始记忆 TTL 和项目字节配额清理；
+- Profile jobs：运行有界数量的个人记忆提炼任务；
+- Claim reconciliation：修复 D1 与 Claims Vectorize 之间的不一致；
+- Segment reconciliation：修复 D1 与 raw segment Vectorize 之间的不一致。
+
 Nudge 会将没有角色标记的 `kind: "user"` 原始文本作为用户证据处理；混合角色文本仍只提取 `[user]` 内容。
 Nudge 处理带前缀的 `session_id` 时按实际分隔符提取外部 Session ID，不依赖 `source_app` 的字符串长度。
 显式 extraction ingest 和 profile ingest flush 在成功入队后也会标记相关 Segment，避免 Nudge 重复拾取。
