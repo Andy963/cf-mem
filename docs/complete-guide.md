@@ -31,7 +31,7 @@
 - `POST /memory/context`
 - `GET /memory/claims`
 - `POST /memory/forget`
-- `GET /admin`（Cloudflare Access 保护的只读管理页）
+- `GET /admin`（Cloudflare Access 保护的管理页）
 - `GET /admin/api/claims`（admin 专用：筛选、搜索和分页查看 claims）
 - `GET /admin/api/claims/:id`（admin 专用：查看 claim 及关联证据）
 - `PUT /admin/api/claims/:id`、`POST /admin/api/claims/:id/retract`、`POST /admin/api/claims/:id/tags`、`DELETE /admin/api/claims/:id/tags/:tag`（admin 专用：带审计的管理操作）
@@ -127,26 +127,29 @@ npx wrangler secret put MEMORY_API_TOKEN
 npm run deploy
 ```
 
-## 自定义域名（可选）
+## 自定义域名与公开入口
 
-默认不绑定自定义域名，只会部署到 `workers.dev` 域名上（由 Wrangler 输出）。
-
-如果你需要绑定自己的域名路由，在你本地的 `cf-mem/wrangler.toml` 里取消注释并修改：
+安全模板默认设置 `workers_dev = false` 和 `preview_urls = false`，因此首次部署不会自动
+产生公开 URL。部署前必须先在本地 `cf-mem/wrangler.toml` 中配置受支持的自定义域名路由：
 
 ```toml
-# [[routes]]
-# pattern = "mem.example.com/*"
-# zone_name = "example.com"
+[[routes]]
+pattern = "mem.example.com/*"
+zone_name = "example.com"
 ```
+
+自定义域名只提供公开入口，不会自动保护 `/admin`。启用 Admin 时还必须为同一主机上的
+`/admin*` 和 `/admin/api/*` 配置 Cloudflare Access；不要通过启用 `workers.dev` 或 preview URL
+绕过该边界。后续健康检查和调用示例中的 `<your-worker>` 均指这个已配置域名。
 
 ## Admin dashboard
 
-`/admin` is a read-only memory console. It shows aggregate active claim, raw segment, storage, and
-per-project usage figures, and lets the administrator filter, search, and inspect full extracted
-claims. The detail pane shows the structured value and linked raw evidence text. It has no write
-actions outside the administrator's explicit edits, retractions, and tag changes. These changes
-are recorded with the Cloudflare Access email, timestamp, reason, and before/after snapshots; the
-original claim is never physically deleted. It never exposes API tokens.
+`/admin` is an Access-protected memory management console. It shows aggregate active claim, raw
+segment, storage, and per-project usage figures, and lets the administrator filter, search, and
+inspect full extracted claims. The detail pane shows the structured value and linked raw evidence
+text. Administrators can explicitly edit claims, retract them, and change tags. These changes are
+recorded with the Cloudflare Access email, timestamp, reason, and before/after snapshots; the
+original claim is never physically deleted. The console never exposes API tokens.
 
 Protect both `mem.example.com/admin*` and `mem.example.com/admin/api/*` with one Cloudflare Access
 Application. Configure the Access policy to allow the administrator's email, then set the same
@@ -226,6 +229,20 @@ src/
 - `expires_at`：raw segment 的 TTL 截止时间
 - `deletion_state`：`active` 或等待 vector 删除完成的 `pending_delete`
 
+## Cron 维护任务
+
+Worker 每十五分钟运行一次维护流水线：
+
+1. Nudge 扫描未标记的原始用户证据并创建提炼任务；
+2. flush 已就绪的 Evidence group；
+3. 执行原始记忆 TTL 和项目字节配额清理；
+4. 处理有界数量的 profile extraction jobs；
+5. reconcile D1 Claims 与 Claims Vectorize；
+6. reconcile D1 raw segments 与 segment Vectorize。
+
+单个阶段的失败会记录并保留重试所需状态，不阻止后续独立阶段执行。下面的 Retention 章节
+只描述其中的删除与配额阶段。
+
 ## Retention 与删除
 
 Worker 每十五分钟运行一次 Cron sweep。它会删除过期、且不再支撑 active claim 的 raw
@@ -281,6 +298,8 @@ its own character budget, and governed by a weaker evidentiary bar:
 A batch that contains no user evidence is not extracted at all, so an assistant monologue cannot
 produce claims on its own.
 
+### Client integration contract
+
 The standalone `scripts/install-hooks.sh` and `scripts/cf_mem_hook.py` are deprecated compatibility
 adapters for existing Codex, Droid, and Claude installations. They remain available during migration,
 but new integrations must use runtime middleware or direct HTTP calls. The recommended runtime flow is:
@@ -320,7 +339,7 @@ turn), and cost three model calls per message. Evidence is instead batched — s
 [Evidence batching](#evidence-batching) below. `job_id` remains in the response as an explicit
 `null` so the payload shape stays stable for existing callers.
 
-The five-minute Cron claims and processes
+The fifteen-minute Cron claims and processes
 jobs using D1 leases, exponential backoff, and a bounded attempt count. Keeping the three external
 model calls out of the ingest request prevents a short request lifecycle from stranding a leased
 job. The extractor endpoint, key, model, and fixed personal owner ID are Worker-only bindings:
@@ -471,14 +490,14 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/jso
 Memory health（使用共享 token 与项目头）：
 
 ```bash
-curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" \
+curl -sS -H "Authorization: Bearer $MEMORY_API_TOKEN" -H "X-Project-Id: cf-mem" \
   https://<your-worker>/memory/health
 ```
 
 Index memory（Worker 会自动补入 `project_id`）：
 
 ```bash
-curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
+curl -sS -H "Authorization: Bearer $MEMORY_API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
   https://<your-worker>/memory/index \
   -d '{"text":"hello world","metadata":{"session_id":"s1","tape":"t1","kind":"note"}}'
 ```
@@ -490,7 +509,7 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Con
 Search memory：
 
 ```bash
-curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
+curl -sS -H "Authorization: Bearer $MEMORY_API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
   https://<your-worker>/memory/search \
   -d '{"query":"hello","topK":5,"filter":{"session_id":"s1","tape":"t1"}}'
 ```
@@ -502,7 +521,7 @@ curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Con
 如果你希望“召回 + 精排”，可以在请求体里打开 `rerank`，让 Worker 额外调用 Workers AI 的 reranker 模型对候选结果重排（会带来额外延迟与成本）：
 
 ```bash
-curl -sS -H "Authorization: Bearer $API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
+curl -sS -H "Authorization: Bearer $MEMORY_API_TOKEN" -H "X-Project-Id: cf-mem" -H "Content-Type: application/json" \
   https://<your-worker>/memory/search \
   -d '{"query":"hello","topK":5,"filter":{"session_id":"s1","tape":"t1"},"rerank":{"enabled":true,"topN":20}}'
 ```
