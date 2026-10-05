@@ -418,23 +418,23 @@ export async function fetchGlobalProfileClaims(
   return result.results;
 }
 
+/**
+ * Fetches legacy workspace-scoped owner claims for profile-only context.
+ * User profiles are global by taxonomy and must never be loaded through this path.
+ */
 export async function fetchWorkspaceProfileClaims(
   db: D1Database,
   projectId: string,
   userId: string,
   workspaceId: string,
   limit: number,
-  category?: ClaimCategory,
   types?: ClaimType[] | null,
 ): Promise<StoredClaimRow[]> {
   const now = Date.now();
-  const categoryCondition = category ? " AND category = ?" : "";
   const typeCondition = types?.length ? ` AND type IN (${types.map(() => "?").join(",")})` : "";
-  const bindings = category
-    ? [projectId, userId, workspaceId, category, now, now, ...(types ?? []), limit]
-    : [projectId, userId, workspaceId, now, now, ...(types ?? []), limit];
+  const bindings = [projectId, userId, workspaceId, now, now, ...(types ?? []), limit];
   const result = await db.prepare(
-    `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = 'user' AND scope_id = ? AND applicability = 'workspace' AND workspace_id = ?${categoryCondition} AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?)`
+    `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND scope_kind = 'user' AND scope_id = ? AND applicability = 'workspace' AND workspace_id = ? AND category != 'user_profile' AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?)`
       + `${typeCondition} ORDER BY updated_at DESC LIMIT ?`,
   ).bind(...bindings).all<StoredClaimRow>();
   return result.results;
