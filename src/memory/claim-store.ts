@@ -548,7 +548,8 @@ export async function loadMemoryContext(
       // by the pre-taxonomy API.
       categories: LEGACY_CONTEXT_CATEGORIES,
     })).filter(
-        (claim) => claim.applicability !== "workspace" || (Boolean(request.workspaceId) && claim.workspace_id === request.workspaceId),
+        (claim) => LEGACY_CONTEXT_CATEGORIES.includes(claim.category ?? "domain_fact")
+          && (claim.applicability !== "workspace" || (Boolean(request.workspaceId) && claim.workspace_id === request.workspaceId)),
       );
   const semanticMatches = await loadSemanticContextClaims(
     env,

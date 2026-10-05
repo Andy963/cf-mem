@@ -520,19 +520,20 @@ export async function fetchOwnerClaims(
     : "COALESCE(workspace_id, '') = ''";
   const workspaceBindings = workspaceId ? [workspaceId] : [];
   const ownerScope = `(scope_kind = 'user' AND scope_id = ? AND category != 'tool_insight' AND ${workspaceCondition})`;
+  const toolInsightScope = `(scope_kind = 'user' AND category = 'tool_insight' AND ${workspaceCondition})`;
   const projectKnowledgeScope = `(scope_kind = 'project' AND scope_id = ? AND (category IN ('rule', 'domain_fact') OR type = 'decision') AND ${workspaceCondition})`;
-  const visibleScope = `(${ownerScope} OR ${projectKnowledgeScope})`;
+  const visibleScope = `(${ownerScope} OR ${toolInsightScope} OR ${projectKnowledgeScope})`;
   const active = await db
     .prepare(
       `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND ${visibleScope} AND status = 'active' AND (valid_from IS NULL OR valid_from <= ?) AND (valid_until IS NULL OR valid_until > ?) ORDER BY updated_at DESC LIMIT ?`,
     )
-    .bind(projectId, ownerId, ...workspaceBindings, projectId, ...workspaceBindings, Date.now(), Date.now(), activeLimit)
+    .bind(projectId, ownerId, ...workspaceBindings, ...workspaceBindings, projectId, ...workspaceBindings, Date.now(), Date.now(), activeLimit)
     .all<StoredClaimRow>();
   const inactive = await db
     .prepare(
       `SELECT ${CLAIM_COLUMNS} FROM memory_claims WHERE project_id = ? AND ${visibleScope} AND status != 'active' ORDER BY updated_at DESC LIMIT ?`,
     )
-    .bind(projectId, ownerId, ...workspaceBindings, projectId, ...workspaceBindings, inactiveLimit)
+    .bind(projectId, ownerId, ...workspaceBindings, ...workspaceBindings, projectId, ...workspaceBindings, inactiveLimit)
     .all<StoredClaimRow>();
   return [...active.results, ...inactive.results];
 }
