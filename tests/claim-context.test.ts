@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   fetchContextClaims: vi.fn(),
   fetchEvidenceByClaimIds: vi.fn(),
   fetchGlobalProfileClaims: vi.fn(),
+  fetchToolInsightClaims: vi.fn(),
   fetchWorkspaceProfileClaims: vi.fn(),
   findVectorizedClaimMatches: vi.fn(),
 }));
@@ -22,6 +23,7 @@ vi.mock("../src/db/d1", async () => {
     fetchContextClaims: mocks.fetchContextClaims,
     fetchEvidenceByClaimIds: mocks.fetchEvidenceByClaimIds,
     fetchGlobalProfileClaims: mocks.fetchGlobalProfileClaims,
+    fetchToolInsightClaims: mocks.fetchToolInsightClaims,
     fetchWorkspaceProfileClaims: mocks.fetchWorkspaceProfileClaims,
   };
 });
@@ -75,7 +77,65 @@ describe("loadMemoryContext semantic retrieval", () => {
     mocks.fetchContextClaims.mockResolvedValue([]);
     mocks.fetchEvidenceByClaimIds.mockResolvedValue(new Map());
     mocks.fetchGlobalProfileClaims.mockResolvedValue([]);
+    mocks.fetchToolInsightClaims.mockResolvedValue([]);
     mocks.fetchWorkspaceProfileClaims.mockResolvedValue([]);
+  });
+
+  it("requires an explicit tool scope for tool insight recall", async () => {
+    const env = { DB: {} as D1Database, SEGMENTS_INDEX: {}, CLAIMS_INDEX: {} } as unknown as Env;
+    const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+    await loadMemoryContext(env, { projectId: "project-1", namespace: "project:project-1" }, {
+      userId: "owner-1",
+      sessionId: null,
+      query: null,
+      types: null,
+      categories: ["tool_insight"],
+      scopeId: null,
+      limit: 5,
+      workspaceId: null,
+      profileOnly: false,
+    }, ctx);
+    expect(mocks.fetchToolInsightClaims).not.toHaveBeenCalled();
+
+    await loadMemoryContext(env, { projectId: "project-1", namespace: "project:project-1" }, {
+      userId: "owner-1",
+      sessionId: null,
+      query: null,
+      types: null,
+      categories: ["tool_insight"],
+      scopeId: "wrangler",
+      limit: 5,
+      workspaceId: null,
+      profileOnly: false,
+    }, ctx);
+    expect(mocks.fetchToolInsightClaims).toHaveBeenCalledWith(env.DB, "project-1", "wrangler", 5, {
+      workspaceId: null,
+      types: null,
+    });
+  });
+
+  it("filters tool insights from legacy context results defensively", async () => {
+    mocks.fetchContextClaims.mockResolvedValue([
+      { ...createClaim("tool-1"), category: "tool_insight", scope_kind: "user", scope_id: "wrangler" },
+      createClaim("domain-1"),
+    ]);
+    const env = { DB: {} as D1Database, SEGMENTS_INDEX: {}, CLAIMS_INDEX: {} } as unknown as Env;
+    const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+    const result = await loadMemoryContext(env, { projectId: "project-1", namespace: "project:project-1" }, {
+      userId: "owner-1",
+      sessionId: null,
+      query: null,
+      types: null,
+      categories: null,
+      scopeId: null,
+      limit: 5,
+      workspaceId: null,
+      profileOnly: false,
+    }, ctx);
+
+    expect(result.claims.map((claim) => claim.id)).toEqual(["domain-1"]);
   });
 
   it("caps semantic context retrieval at five Vectorize matches", async () => {

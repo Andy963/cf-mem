@@ -37,7 +37,7 @@ describe("fetchOwnerClaims", () => {
       expect(statement.sql).toContain("scope_kind = 'user' AND scope_id = ?");
       expect(statement.sql).toContain("scope_kind = 'project' AND scope_id = ?");
       expect(statement.sql).toContain("category IN ('rule', 'domain_fact') OR type = 'decision'");
-      expect(statement.sql).toContain("category != 'tool_insight'");
+      expect(statement.sql).toContain("category = 'tool_insight'");
       expect(statement.sql).not.toContain("scope_kind = 'user' AND scope_id != ?");
       expect(statement.values).toContain("owner-1");
       expect(statement.values).toContain("project-1");

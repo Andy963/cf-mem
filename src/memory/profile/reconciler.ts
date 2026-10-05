@@ -191,31 +191,30 @@ export function reconcileAcceptedCandidates(
   const activeIds = new Set(activeClaims.filter((claim) => claim.status === "active").map((claim) => claim.id));
   const decisionByIndex = new Map<number, ReconciliationDecision>();
   for (const decision of decisions) {
-    if (decision.candidate_index < 0 || decision.candidate_index >= accepted.length || decisionByIndex.has(decision.candidate_index)) {
-      throw new Error("reconciler_response_invalid_candidate_index");
-    }
+    if (decision.candidate_index < 0 || decision.candidate_index >= accepted.length || decisionByIndex.has(decision.candidate_index)) continue;
     decisionByIndex.set(decision.candidate_index, decision);
   }
-  if (decisionByIndex.size !== accepted.length) throw new Error("reconciler_response_incomplete_decisions");
 
   const activeById = new Map(activeClaims.filter((claim) => claim.status === "active").map((claim) => [claim.id, claim]));
   return accepted.map((candidate, index) => {
-    const decision = decisionByIndex.get(index) as ReconciliationDecision;
+    const decision = decisionByIndex.get(index);
+    // A malformed or missing decision must not discard an otherwise valid
+    // candidate or fail the whole extraction batch. Keep the extractor's
+    // already-validated operation and let the normal mutation path handle it.
+    if (!decision) return candidate;
     if (decision.action === "keep") return candidate;
     if (decision.action === "reinforce") {
-      if (!decision.claim_id || !activeIds.has(decision.claim_id)) throw new Error("reconciler_response_invalid_claim_id");
+      if (!decision.claim_id || !activeIds.has(decision.claim_id)) return candidate;
       const existing = activeById.get(decision.claim_id);
-      if (existing && existing.category !== candidate.category) throw new Error("reconciler_response_category_mismatch");
+      if (existing && existing.category !== candidate.category) return candidate;
       if (existing && !containsChinese(existing.canonical_text) && isChineseClaimText(candidate)) {
         return { ...candidate, operation: "supersede", replaces_claim_id: decision.claim_id, claim_id: undefined };
       }
       return { ...candidate, operation: "reinforce", claim_id: decision.claim_id, replaces_claim_id: undefined };
     }
-    if (!decision.replaces_claim_id || !activeIds.has(decision.replaces_claim_id)) {
-      throw new Error("reconciler_response_invalid_replacement");
-    }
+    if (!decision.replaces_claim_id || !activeIds.has(decision.replaces_claim_id)) return candidate;
     const existing = activeById.get(decision.replaces_claim_id);
-    if (existing && existing.category !== candidate.category) throw new Error("reconciler_response_category_mismatch");
+    if (existing && existing.category !== candidate.category) return candidate;
     return { ...candidate, operation: "supersede", replaces_claim_id: decision.replaces_claim_id, claim_id: undefined };
   });
 }
