@@ -471,19 +471,6 @@ export async function loadMemoryContext(
         deterministicClaims.push(
           ...await fetchGlobalProfileClaims(db, projectScope.projectId, request.userId, request.limit, "user_profile", request.types),
         );
-        if (request.workspaceId) {
-          deterministicClaims.push(
-            ...await fetchWorkspaceProfileClaims(
-              db,
-              projectScope.projectId,
-              request.userId,
-              request.workspaceId,
-              request.limit,
-              "user_profile",
-              request.types,
-            ),
-          );
-        }
       }
     }
 
@@ -535,7 +522,6 @@ export async function loadMemoryContext(
             request.userId,
             request.workspaceId,
             request.limit,
-            undefined,
             request.types,
           )
           : []),

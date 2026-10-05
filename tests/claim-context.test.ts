@@ -218,13 +218,22 @@ describe("loadMemoryContext semantic retrieval", () => {
     expect(result.claims.every((claim) => claim.scope_kind === "project")).toBe(true);
   });
 
-  it("does not return another user's profile claims", async () => {
+  it("loads only global profile claims when a workspace is present", async () => {
     const env = {
       DB: {} as D1Database,
       SEGMENTS_INDEX: {},
       CLAIMS_INDEX: {},
     } as unknown as Env;
     const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const profileClaim: StoredClaimRow = {
+      ...createClaim("profile-1"),
+      scope_kind: "user",
+      scope_id: "different-user",
+      category: "user_profile",
+      type: "profile",
+      applicability: "global",
+    };
+    mocks.fetchGlobalProfileClaims.mockResolvedValue([profileClaim]);
 
     const result = await loadMemoryContext(
       env,
@@ -237,13 +246,13 @@ describe("loadMemoryContext semantic retrieval", () => {
         categories: ["user_profile"],
         scopeId: null,
         limit: 5,
-        workspaceId: null,
+        workspaceId: "workspace-1",
         profileOnly: false,
       },
       ctx,
     );
 
-    expect(result.claims).toEqual([]);
+    expect(result.claims.map((claim) => claim.id)).toEqual(["profile-1"]);
     expect(mocks.fetchGlobalProfileClaims).toHaveBeenCalledWith(
       env.DB,
       "project-1",
@@ -252,6 +261,7 @@ describe("loadMemoryContext semantic retrieval", () => {
       "user_profile",
       null,
     );
+    expect(mocks.fetchWorkspaceProfileClaims).not.toHaveBeenCalled();
   });
 
   it("returns before the usage update completes and keeps the update in waitUntil", async () => {
