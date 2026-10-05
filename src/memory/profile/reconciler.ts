@@ -34,6 +34,11 @@ function isChineseClaimText(candidate: ExtractedClaim): boolean {
   return typeof candidate.canonical_text === "string" && containsChinese(candidate.canonical_text);
 }
 
+function matchesReconciliationTarget(candidate: ExtractedClaim, existing: StoredClaimRow): boolean {
+  if (existing.category !== candidate.category) return false;
+  return existing.category !== "tool_insight" || existing.scope_id === candidate.scope_id;
+}
+
 /**
  * Timestamps must be future Unix milliseconds. Models routinely emit seconds
  * instead, which used to sail through validation and create a claim that was
@@ -206,7 +211,7 @@ export function reconcileAcceptedCandidates(
     if (decision.action === "reinforce") {
       if (!decision.claim_id || !activeIds.has(decision.claim_id)) return candidate;
       const existing = activeById.get(decision.claim_id);
-      if (existing && existing.category !== candidate.category) return candidate;
+      if (existing && !matchesReconciliationTarget(candidate, existing)) return candidate;
       if (existing && !containsChinese(existing.canonical_text) && isChineseClaimText(candidate)) {
         return { ...candidate, operation: "supersede", replaces_claim_id: decision.claim_id, claim_id: undefined };
       }
@@ -214,7 +219,7 @@ export function reconcileAcceptedCandidates(
     }
     if (!decision.replaces_claim_id || !activeIds.has(decision.replaces_claim_id)) return candidate;
     const existing = activeById.get(decision.replaces_claim_id);
-    if (existing && existing.category !== candidate.category) return candidate;
+    if (existing && !matchesReconciliationTarget(candidate, existing)) return candidate;
     return { ...candidate, operation: "supersede", replaces_claim_id: decision.replaces_claim_id, claim_id: undefined };
   });
 }

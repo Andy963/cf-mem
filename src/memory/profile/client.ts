@@ -330,6 +330,7 @@ export async function callExtractor(
     type: claim.type,
     subject: claim.subject,
     memory_key: claim.memory_key,
+    scope_id: claim.scope_id,
     canonical_text: claim.canonical_text,
     applicability: claim.applicability,
     workspace_id: claim.workspace_id,
@@ -402,6 +403,7 @@ export async function callReconciliation(
       type: claim.type,
       subject: claim.subject,
       memory_key: claim.memory_key,
+      scope_id: claim.scope_id,
       value_json: claim.value_json,
       canonical_text: claim.canonical_text,
       applicability: claim.applicability,
@@ -440,14 +442,21 @@ export async function callReconciliation(
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("reconciler_response_invalid_json");
   const decisions = (parsed as { decisions?: unknown }).decisions;
   if (!Array.isArray(decisions)) throw new Error("reconciler_response_missing_decisions");
+  const seenCandidateIndexes = new Set<number>();
   const validDecisions = decisions.filter((decision): decision is ReconciliationDecision => {
     if (!decision || typeof decision !== "object" || Array.isArray(decision)) return false;
     const value = decision as Record<string, unknown>;
-    return Number.isInteger(value.candidate_index)
-      && (value.candidate_index as number) >= 0
-      && (value.candidate_index as number) < accepted.length
-      && typeof value.reason === "string"
-      && (value.action === "keep" || value.action === "reinforce" || value.action === "supersede");
+    const candidateIndex = value.candidate_index;
+    if (!Number.isInteger(candidateIndex)
+      || (candidateIndex as number) < 0
+      || (candidateIndex as number) >= accepted.length
+      || seenCandidateIndexes.has(candidateIndex as number)
+      || typeof value.reason !== "string"
+      || (value.action !== "keep" && value.action !== "reinforce" && value.action !== "supersede")) {
+      return false;
+    }
+    seenCandidateIndexes.add(candidateIndex as number);
+    return true;
   });
   return validDecisions.slice(0, accepted.length);
 }
