@@ -68,12 +68,12 @@ describe("withClaimDedupLock", () => {
     expect(statements).toHaveLength(2);
     expect(statements[0]?.sql).toContain("INSERT OR IGNORE");
     expect(statements[0]?.sql).toContain("category");
-    expect(statements[0]?.values.slice(0, 6)).toEqual([
+    expect(statements[0]?.sql).not.toContain("type");
+    expect(statements[0]?.values.slice(0, 5)).toEqual([
       "project-1",
       "user",
       "user-1",
       "domain_fact",
-      "decision",
       "workspace-1",
     ]);
     expect(statements[1]?.sql).toContain("DELETE FROM memory_claim_dedup_locks");
@@ -100,6 +100,18 @@ describe("withClaimDedupLock", () => {
 
     expect(statements[0]?.values[3]).toBe("domain_fact");
     expect(statements[2]?.values[3]).toBe("rule");
+  });
+
+  it("shares one lock identity across types in the same category", async () => {
+    const { db, statements } = createDatabase([1, 0, 1, 0]);
+    const instructionClaim = { ...claim, category: "rule" as const, type: "instruction" as const };
+    const preferenceClaim = { ...claim, category: "rule" as const, type: "preference" as const };
+
+    await withClaimDedupLock(db, "project-1", instructionClaim, async () => undefined);
+    await withClaimDedupLock(db, "project-1", preferenceClaim, async () => undefined);
+
+    expect(statements[0]?.values.slice(0, 5)).toEqual(statements[2]?.values.slice(0, 5));
+    expect(statements[0]?.values[3]).toBe("rule");
   });
 
   it("recognizes an unchanged semantic scope snapshot", async () => {
