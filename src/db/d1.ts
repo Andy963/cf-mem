@@ -1,4 +1,5 @@
 import type { ClaimApplicability, ClaimCategory, ClaimInput, ClaimProvenance, ClaimStatus, ClaimType, ScopeKind } from "../memory/claims";
+import { ClaimSchemaError } from "../memory/claims";
 import type { PreparedIndexItem, StoredMemoryRow } from "../memory/schema";
 import { chunkArray } from "../utils";
 
@@ -317,12 +318,16 @@ export async function replaceActiveClaim(
   claim: ClaimInput,
   now: number,
 ): Promise<void> {
+  const superseded = await db
+    .prepare(
+      "UPDATE memory_claims SET status = 'superseded', superseded_by = ?, valid_until = ?, updated_at = ? WHERE project_id = ? AND id = ? AND status = 'active'",
+    )
+    .bind(replacementClaimId, now, now, projectId, previousClaimId)
+    .run();
+  if (!superseded.meta.changes) {
+    throw new ClaimSchemaError("Cannot replace claim because it is no longer active");
+  }
   await db.batch([
-    db
-      .prepare(
-        "UPDATE memory_claims SET status = 'superseded', superseded_by = ?, valid_until = COALESCE(valid_until, ?), updated_at = ? WHERE project_id = ? AND id = ? AND status = 'active'",
-      )
-      .bind(replacementClaimId, now, now, projectId, previousClaimId),
     insertClaimStatement(db, projectId, replacementClaimId, claim, "active", now),
     ...evidenceStatements(db, projectId, replacementClaimId, claim.evidenceSegmentIds, "supports", now),
   ]);

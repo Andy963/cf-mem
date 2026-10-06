@@ -14,6 +14,32 @@ import {
   type ProfileJob,
 } from "./shared";
 
+function mutationResponseToRow(response: Record<string, unknown>): StoredClaimRow {
+  return { ...response, value_json: JSON.stringify(response.value ?? null) } as StoredClaimRow;
+}
+
+/**
+ * Keeps the batch's view of active claims in step with the mutations it has
+ * already applied, so later candidates can address claims created, superseded,
+ * or retracted earlier in the same run.
+ */
+function syncActiveClaim(
+  activeById: Map<string, StoredClaimRow>,
+  extracted: ExtractedClaim,
+  response: Record<string, unknown>,
+): void {
+  const row = mutationResponseToRow(response);
+  activeById.set(row.id, row);
+  // A supersede with an unchanged value reinforces the target in place, so
+  // only a real replacement (a different claim id) retires the previous one.
+  const replacedId = extracted.operation === "supersede" ? extracted.replaces_claim_id : undefined;
+  if (!replacedId || replacedId === row.id) return;
+  const replaced = activeById.get(replacedId);
+  if (replaced && replaced.status === "active") {
+    activeById.set(replacedId, { ...replaced, status: "superseded", superseded_by: row.id });
+  }
+}
+
 async function applyOneClaim(
   env: Env,
   scope: ProjectScope,
@@ -22,7 +48,7 @@ async function applyOneClaim(
   activeById: ReadonlyMap<string, StoredClaimRow>,
   jobEvidence: string[],
   survivingEvidenceIds: ReadonlySet<string>,
-): Promise<void> {
+): Promise<Record<string, unknown> | null> {
   // Must match candidateAccepted's view: verifyEvidence rejects any id whose
   // segment was pruned by retention, and that throw is swallowed per candidate,
   // so an unfiltered id here loses an already-accepted claim silently.
@@ -40,10 +66,10 @@ async function applyOneClaim(
       throw new Error("extractor_claim_category_mismatch");
     }
     if (extracted.operation === "retract" && activeById.get(claimId)?.status === "retracted") {
-      return;
+      return null;
     }
     if (activeById.get(claimId)?.status !== "active") throw new Error("extractor_claim_inactive_claim_id");
-    await mutateClaim(env, scope, extracted.operation === "reinforce"
+    return await mutateClaim(env, scope, extracted.operation === "reinforce"
       ? {
         operation: "reinforce",
         claimId,
@@ -51,7 +77,6 @@ async function applyOneClaim(
         confidence: typeof extracted.confidence === "number" ? extracted.confidence : null,
       }
       : { operation: "retract", claimId });
-    return;
   }
 
   const existing = extracted.operation === "supersede"
@@ -70,7 +95,7 @@ async function applyOneClaim(
     ) {
       throw new Error("extractor_claim_conflicting_replacement");
     }
-    return;
+    return null;
   }
   const claimType = existing?.type ?? extracted.type;
   const claimCategory: ClaimCategory = existing?.category ?? extracted.category ?? (
@@ -123,7 +148,7 @@ async function applyOneClaim(
       evidence_segment_ids: resolvedEvidenceIds,
     },
   }, scope);
-  await mutateClaim(env, scope, mutation);
+  return await mutateClaim(env, scope, mutation);
 }
 
 /**
@@ -146,7 +171,8 @@ export async function applyExtractedClaims(
 
   for (const [index, extracted] of output.entries()) {
     try {
-      await applyOneClaim(env, scope, job, extracted, activeById, jobEvidence, survivingEvidenceIds);
+      const response = await applyOneClaim(env, scope, job, extracted, activeById, jobEvidence, survivingEvidenceIds);
+      if (response) syncActiveClaim(activeById, extracted, response);
       applied += 1;
     } catch (error) {
       if (isBreakerOpenError(error)) throw error;
